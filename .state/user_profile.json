@@ -1,0 +1,19 @@
+{
+  "career_goals": "AI Engineering",
+  "hours_per_week": 5,
+  "excluded_days": [
+    "Saturday",
+    "Sunday"
+  ],
+  "market_insights": [
+    "AI Engineering roles grew 45% this quarter.",
+    "High demand for Model Context Protocol (MCP) experience.",
+    "Sought-after skills include: agent architecture, semantic search, DAG routing."
+  ],
+  "suggested_focus_areas": [
+    "Model Context Protocol (MCP)",
+    "Agentic Architectures",
+    "Semantic Search & RAG"
+  ],
+  "created_at": "2026-07-02T01:43:00Z"
+}
