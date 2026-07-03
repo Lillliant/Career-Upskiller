@@ -3,89 +3,209 @@ import { useAppState } from '../stateManager';
 
 export default function OnboardingWizard() {
   const [state, setState] = useAppState();
+  
+  // Local state for Onboarding Wizard
   const [goals, setGoals] = useState(state.careerGoals || 'AI Engineering');
+  const [firstProject, setFirstProject] = useState('Build an ADK workflow');
   const [hours, setHours] = useState(state.hoursPerWeek || 5);
-  const [localCalendars, setLocalCalendars] = useState(state.targetCalendars);
-  const [step, setStep] = useState(1);
+  const [startTime, setStartTime] = useState(state.preferredStartTime || '09:00');
+  const [endTime, setEndTime] = useState(state.preferredEndTime || '17:00');
+  const [localExcludedDays, setLocalExcludedDays] = useState(state.excludedDays || ['Saturday', 'Sunday']);
+  
+  const [localCalendars, setLocalCalendars] = useState(
+    state.targetCalendars.map(c => ({
+      ...c,
+      provider: c.provider || 'google',
+      role: c.role || (c.id === 'cal-work' ? 'write' : 'read_only'),
+      icalUrl: c.icalUrl || ''
+    }))
+  );
 
-  const toggleCalendar = (id) => {
-    const updated = localCalendars.map(cal => 
-      cal.id === id ? { ...cal, selected: !cal.selected } : cal
-    );
-    setLocalCalendars(updated);
-    setState({ targetCalendars: updated });
+  const [step, setStep] = useState(1);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const toggleExcludedDay = (day) => {
+    if (localExcludedDays.includes(day)) {
+      setLocalExcludedDays(localExcludedDays.filter(d => d !== day));
+    } else {
+      setLocalExcludedDays([...localExcludedDays, day]);
+    }
   };
 
-  const handleNext = () => {
-    if (step === 1) {
-      setStep(2);
+  const updateCalendarField = (id, field, value) => {
+    const updated = localCalendars.map(cal => {
+      if (cal.id === id) {
+        let newCal = { ...cal, [field]: value };
+        // Under Zero-Trust rules, only ONE calendar can be the 'write' destination
+        if (field === 'role' && value === 'write') {
+          return newCal; // handled below to unset others
+        }
+        return newCal;
+      }
+      return cal;
+    });
+
+    if (field === 'role' && value === 'write') {
+      // Unset role='write' on all other calendars, forcing them to 'read_only'
+      updated.forEach(c => {
+        if (c.id !== id && c.role === 'write') {
+          c.role = 'read_only';
+        }
+      });
+    }
+    setLocalCalendars(updated);
+  };
+
+  const handleNext = async () => {
+    if (step < 3) {
+      setStep(step + 1);
     } else {
-      // Complete onboarding and stage schedule (with mock data if simulating)
-      const selectedIds = localCalendars.filter(c => c.selected).map(c => c.id);
+      setIsSaving(true);
       
+      const targetCals = localCalendars.map(cal => ({
+        id: cal.id,
+        name: cal.name,
+        selected: cal.role !== 'isolated',
+        sensitive: cal.sensitive,
+        provider: cal.provider,
+        role: cal.role,
+        url: cal.icalUrl
+      }));
+
+      const newGoal = {
+        title: firstProject,
+        description: `Kickstart project for ${goals}`,
+        status: 'in-progress',
+        time_spent_mins: 0,
+        sub_projects: [
+          { title: "Review market insights", completed: true },
+          { title: "Define workflow edges", completed: false },
+          { title: "Confirm Zero-Trust calendar write", completed: false }
+        ]
+      };
+
       const updatedState = {
         careerGoals: goals,
         hoursPerWeek: hours,
+        preferredStartTime: startTime,
+        preferredEndTime: endTime,
+        excludedDays: localExcludedDays,
+        targetCalendars: targetCals,
+        goals: [newGoal],
         onboarded: true,
         activeTab: 'schedule'
       };
 
       if (state.isSimulating) {
-        // Mock a schedule proposal (Phase 2 / 2b Scarcity)
+        // Simulation mode: stage mock weekly events
         const mockTransactionId = `tx-sim-${Math.random().toString(36).substring(2, 8)}`;
         const mockToken = `token-sim-${Math.random().toString(36).substring(2, 10)}`;
         
-        // Generate proposed events based on goals
+        // Generate proposed events matching rotating goals/projects
         const proposed = [
           {
             id: 'evt-1',
-            summary: `Micro-learning: ${goals} Deep Dive`,
+            summary: `Learning: ${firstProject}`,
             start: "2026-07-02T11:30:00-04:00",
             end: "2026-07-02T12:00:00-04:00",
-            description: `Short focused study slot on ${goals} created due to high calendar density.`
+            description: `Scheduled upskilling for goal '${firstProject}' due to calendar constraints.`
           },
           {
             id: 'evt-2',
-            summary: `Micro-learning: ${goals} Practical Lab`,
-            start: "2026-07-02T14:30:00-04:00",
-            end: "2026-07-02T15:00:00-04:00",
-            description: `Hands-on practice block to build concrete ${goals} skills.`
+            summary: `Learning: ${goals} Overview`,
+            start: "2026-07-03T14:00:00-04:00",
+            end: "2026-07-03T15:00:00-04:00",
+            description: `Scheduled study on ${goals} market trends.`
           }
         ];
 
-        updatedState.transactionId = mockTransactionId;
-        updatedState.token = mockToken;
-        updatedState.proposedEvents = proposed;
-        updatedState.scarcityFlag = true;
-        updatedState.reason = "Calendar is dense with Work meetings. The Concierge gracefully degraded your daily target of 2 hours into two 30-minute micro-learning blocks.";
-      }
+        setState({
+          ...updatedState,
+          transactionId: mockTransactionId,
+          token: mockToken,
+          proposedEvents: proposed,
+          scarcityFlag: true,
+          reason: "Calendar is dense with meetings. Some blocks degraded to 30 minutes to fit working hours.",
+        });
+      } else {
+        // Live mode: POST to FastAPI app
+        try {
+          // 1. Save profile configuration
+          const resProfile = await fetch('/api/profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              career_goals: goals,
+              hours_per_week: hours,
+              preferred_start_time: startTime,
+              preferred_end_time: endTime,
+              excluded_days: localExcludedDays,
+              target_calendars: targetCals
+            })
+          });
 
-      setState(updatedState);
+          if (!resProfile.ok) throw new Error("Failed to save profile on backend.");
+
+          // 2. Create the first goal
+          const resGoal = await fetch('/api/goals', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: newGoal.title,
+              description: newGoal.description,
+              status: newGoal.status,
+              sub_projects: newGoal.sub_projects
+            })
+          });
+
+          if (!resGoal.ok) throw new Error("Failed to create first goal on backend.");
+
+          // 3. Initiate agent staging schedule run
+          const runRes = await fetch('/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user_id: 'test_user_123',
+              session_id: 'active_session_123',
+              new_message: {
+                role: 'user',
+                parts: [{ text: "Initialize schedule." }]
+              }
+            })
+          });
+
+          if (runRes.ok) {
+            const runData = await runRes.json();
+            console.log("Agent scheduling initialized:", runRes);
+          }
+
+          // Trigger state fetches
+          setState(updatedState);
+        } catch (err) {
+          console.error("Failed to complete onboarding:", err);
+          alert(`Onboarding write error: ${err.message}. Saving state locally in simulation mode.`);
+          setState(updatedState);
+        }
+      }
+      setIsSaving(false);
     }
   };
 
+  const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
   return (
     <div style={styles.container} className="glass-card animate-fade-in">
+      {/* Progress indicators */}
       <div style={styles.statusBar}>
-        <div style={{ ...styles.stepIndicator, backgroundColor: step >= 1 ? '#6366f1' : '#334155' }}></div>
-        <div style={{ ...styles.stepIndicator, backgroundColor: step >= 2 ? '#6366f1' : '#334155' }}></div>
+        <div style={{ ...styles.stepIndicator, backgroundColor: step >= 1 ? 'var(--color-accent)' : 'var(--input-border)' }}></div>
+        <div style={{ ...styles.stepIndicator, backgroundColor: step >= 2 ? 'var(--color-accent)' : 'var(--input-border)' }}></div>
+        <div style={{ ...styles.stepIndicator, backgroundColor: step >= 3 ? 'var(--color-accent)' : 'var(--input-border)' }}></div>
       </div>
 
-      {step === 1 ? (
+      {step === 1 && (
         <div>
-          <h2 style={styles.title}>Welcome to Career Skill Concierge 👤</h2>
-          <p style={styles.subtitle}>Let's build a personalized career advancement plan aligned with real-time market trends.</p>
-
-          <div style={styles.insightsCard}>
-            <h4 style={styles.insightsTitle}>📈 Live Market Analytics</h4>
-            <ul style={styles.insightsList}>
-              {state.marketInsights.map((insight, idx) => (
-                <li key={idx} style={styles.insightItem}>
-                  <span style={styles.bullet}>⚡</span> {insight}
-                </li>
-              ))}
-            </ul>
-          </div>
+          <h2 style={styles.title}>1. Skill Goals & Project Draft 🎯</h2>
+          <p style={styles.subtitle}>Specify the career direction and outline your first concrete learning project.</p>
 
           <div style={styles.formGroup}>
             <label style={styles.label}>What is your target career upskilling goal?</label>
@@ -97,6 +217,39 @@ export default function OnboardingWizard() {
               placeholder="e.g. AI Engineering, Cloud Architecture"
             />
           </div>
+
+          <div style={styles.formGroup}>
+            <label style={styles.label}>Draft your first goal/project title:</label>
+            <input 
+              type="text" 
+              value={firstProject} 
+              onChange={(e) => setFirstProject(e.target.value)} 
+              style={styles.textInput} 
+              placeholder="e.g. Implement semantic search API"
+            />
+          </div>
+
+          <div style={styles.insightsCard}>
+            <h4 style={styles.insightsTitle}>📊 Live Market Trends</h4>
+            <ul style={styles.insightsList}>
+              {state.marketInsights.map((insight, idx) => (
+                <li key={idx} style={styles.insightItem}>
+                  <span style={styles.bullet}>⚡</span> {insight}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <button onClick={handleNext} style={styles.primaryButton}>
+            Next: Scheduling Preferences →
+          </button>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div>
+          <h2 style={styles.title}>2. Working Hours & Pacing ⏱️</h2>
+          <p style={styles.subtitle}>Configure your time constraints and pacing preferences.</p>
 
           <div style={styles.formGroup}>
             <label style={styles.label}>Weekly time budget: <strong>{hours} hours/week</strong></label>
@@ -115,54 +268,118 @@ export default function OnboardingWizard() {
             </div>
           </div>
 
-          <button onClick={handleNext} style={styles.primaryButton}>
-            Continue to Calendar Scope Selection →
-          </button>
+          <div style={styles.row}>
+            <div style={{ ...styles.formGroup, flex: 1 }}>
+              <label style={styles.label}>Preferred start time:</label>
+              <select value={startTime} onChange={(e) => setStartTime(e.target.value)} style={styles.selectInput}>
+                {Array.from({ length: 24 }).map((_, h) => {
+                  const hour = `${h.toString().padStart(2, '0')}:00`;
+                  return <option key={hour} value={hour}>{hour}</option>;
+                })}
+              </select>
+            </div>
+            <div style={{ ...styles.formGroup, flex: 1 }}>
+              <label style={styles.label}>Preferred end time:</label>
+              <select value={endTime} onChange={(e) => setEndTime(e.target.value)} style={styles.selectInput}>
+                {Array.from({ length: 24 }).map((_, h) => {
+                  const hour = `${h.toString().padStart(2, '0')}:00`;
+                  return <option key={hour} value={hour}>{hour}</option>;
+                })}
+              </select>
+            </div>
+          </div>
+
+          <div style={styles.formGroup}>
+            <label style={styles.label}>Excluded study days:</label>
+            <div style={styles.daysList}>
+              {daysOfWeek.map(day => {
+                const isExcluded = localExcludedDays.includes(day);
+                return (
+                  <button 
+                    key={day}
+                    onClick={() => toggleExcludedDay(day)}
+                    style={{
+                      ...styles.dayBadge,
+                      backgroundColor: isExcluded ? 'var(--color-warning)' : 'var(--bg-sidebar)',
+                      color: isExcluded ? '#000000' : 'var(--color-text-main)',
+                      borderColor: isExcluded ? 'var(--color-warning)' : 'var(--input-border)'
+                    }}
+                  >
+                    {day.substring(0, 3)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={styles.buttonGroup}>
+            <button onClick={() => setStep(1)} style={styles.secondaryButton}>
+              Back
+            </button>
+            <button onClick={handleNext} style={styles.primaryButton}>
+              Next: Calendar Scoping →
+            </button>
+          </div>
         </div>
-      ) : (
+      )}
+
+      {step === 3 && (
         <div>
-          <h2 style={styles.title}>Zero-Trust Calendar Authorization 🔒</h2>
+          <h2 style={styles.title}>3. Zero-Trust Calendar Authorization 🔒</h2>
           <p style={styles.subtitle}>
-            Select target calendars allowed for scheduling. Unselected calendars will remain <strong>completely isolated</strong> and dark to the agent.
+            Authorize access scopes. Under security directives, you must designate exactly one **Write Calendar**. iCal feeds require subscription URLs.
           </p>
 
           <div style={styles.scopingBox}>
-            <div style={styles.scopingHeader}>
-              <span>Target Calendar</span>
-              <span>Permission Scope</span>
-            </div>
-            
             {localCalendars.map((cal) => (
-              <div 
-                key={cal.id} 
-                onClick={() => toggleCalendar(cal.id)}
-                style={{
-                  ...styles.calendarRow,
-                  borderLeft: cal.selected ? '4px solid #6366f1' : '4px solid #334155',
-                  backgroundColor: cal.selected ? 'rgba(99, 102, 241, 0.05)' : 'transparent'
-                }}
-              >
-                <div style={styles.calendarInfo}>
-                  <input 
-                    type="checkbox" 
-                    checked={cal.selected} 
-                    onChange={() => {}} // Handled by row onClick
-                    style={styles.checkbox}
-                  />
+              <div key={cal.id} style={styles.calendarCard}>
+                <div style={styles.calendarRow}>
                   <div>
                     <div style={styles.calendarName}>{cal.name}</div>
-                    {cal.sensitive && (
-                      <span style={styles.sensitiveLabel}>🔒 Strictly Private / Dark</span>
-                    )}
+                    <div style={styles.sensitiveDesc}>
+                      {cal.sensitive ? '🔒 Contains private information' : '🔓 Public business events'}
+                    </div>
+                  </div>
+
+                  <div style={styles.selectors}>
+                    <select 
+                      value={cal.provider} 
+                      onChange={(e) => updateCalendarField(cal.id, 'provider', e.target.value)} 
+                      style={styles.inlineSelect}
+                    >
+                      <option value="google">Google Calendar</option>
+                      <option value="apple">Apple iCloud</option>
+                      <option value="microsoft">Outlook</option>
+                      <option value="ical">iCal Subscription</option>
+                    </select>
+
+                    <select 
+                      value={cal.role} 
+                      onChange={(e) => updateCalendarField(cal.id, 'role', e.target.value)} 
+                      style={{
+                        ...styles.inlineSelect,
+                        color: cal.role === 'write' ? 'var(--color-success)' : cal.role === 'read_only' ? 'var(--color-accent)' : 'var(--color-text-muted)'
+                      }}
+                    >
+                      <option value="write">Write destination</option>
+                      <option value="read_only">Display Only (Read)</option>
+                      <option value="isolated">Isolated (Invisible)</option>
+                    </select>
                   </div>
                 </div>
-                <div>
-                  {cal.selected ? (
-                    <span style={styles.scopeBadgeAllowed}>✓ Read/Staging Access</span>
-                  ) : (
-                    <span style={styles.scopeBadgeBlocked}>Isolated (Invisible)</span>
-                  )}
-                </div>
+
+                {cal.provider === 'ical' && cal.role !== 'isolated' && (
+                  <div style={styles.icalInputRow}>
+                    <label style={styles.smallLabel}>iCal Subscription URL:</label>
+                    <input 
+                      type="text" 
+                      value={cal.icalUrl} 
+                      onChange={(e) => updateCalendarField(cal.id, 'icalUrl', e.target.value)} 
+                      placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
+                      style={styles.textInputSmall}
+                    />
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -170,16 +387,16 @@ export default function OnboardingWizard() {
           <div style={styles.trustBanner}>
             <div style={styles.trustIcon}>🛡️</div>
             <div style={styles.trustText}>
-              <strong>Privacy Mandate:</strong> The client state manager cryptographically binds the allowed calendar identifiers to all requests. The orchestrator cannot fetch schedule events outside these scopes.
+              <strong>Privacy Protection:</strong> The Concierge reads busy events in memory for scheduling but strictly limits writes to the single designated write destination.
             </div>
           </div>
 
           <div style={styles.buttonGroup}>
-            <button onClick={() => setStep(1)} style={styles.secondaryButton}>
-              ← Back
+            <button onClick={() => setStep(2)} style={styles.secondaryButton}>
+              Back
             </button>
-            <button onClick={handleNext} style={styles.primaryButton}>
-              Finalize Onboarding & Stage Schedule
+            <button onClick={handleNext} style={styles.primaryButton} disabled={isSaving}>
+              {isSaving ? 'Saving Configurations...' : 'Finalize & Stage Schedule'}
             </button>
           </div>
         </div>
@@ -193,6 +410,7 @@ const styles = {
     maxWidth: '650px',
     margin: '30px auto',
     padding: '30px',
+    width: '100%',
   },
   statusBar: {
     display: 'flex',
@@ -206,28 +424,106 @@ const styles = {
     transition: 'background-color 0.3s ease',
   },
   title: {
-    fontSize: '24px',
+    fontSize: '22px',
     marginBottom: '8px',
-    background: 'linear-gradient(to right, #60a5fa, #a78bfa)',
+    background: 'linear-gradient(to right, var(--color-accent), #a78bfa)',
     WebkitBackgroundClip: 'text',
     WebkitTextFillColor: 'transparent',
   },
   subtitle: {
-    fontSize: '14px',
-    color: '#94a3b8',
+    fontSize: '13px',
+    color: 'var(--color-text-muted)',
     marginBottom: '24px',
     lineHeight: '1.5',
   },
+  formGroup: {
+    marginBottom: '20px',
+  },
+  row: {
+    display: 'flex',
+    gap: '16px',
+  },
+  label: {
+    display: 'block',
+    fontSize: '13px',
+    color: 'var(--color-text-main)',
+    marginBottom: '8px',
+    fontWeight: '600',
+  },
+  smallLabel: {
+    display: 'block',
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
+    marginBottom: '4px',
+  },
+  textInput: {
+    width: '100%',
+    backgroundColor: 'var(--input-bg)',
+    border: '1px solid var(--input-border)',
+    borderRadius: '8px',
+    padding: '12px 16px',
+    fontSize: '14px',
+    color: 'var(--color-text-main)',
+    outline: 'none',
+    transition: 'border-color 0.2s',
+  },
+  textInputSmall: {
+    width: '100%',
+    backgroundColor: 'var(--bg-main)',
+    border: '1px solid var(--input-border)',
+    borderRadius: '6px',
+    padding: '8px 12px',
+    fontSize: '12px',
+    color: 'var(--color-text-main)',
+    outline: 'none',
+  },
+  selectInput: {
+    width: '100%',
+    backgroundColor: 'var(--input-bg)',
+    border: '1px solid var(--input-border)',
+    borderRadius: '8px',
+    padding: '12px',
+    fontSize: '14px',
+    color: 'var(--color-text-main)',
+    outline: 'none',
+  },
+  rangeInput: {
+    width: '100%',
+    cursor: 'pointer',
+    accentColor: 'var(--color-accent)',
+  },
+  rangeLabels: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
+    marginTop: '4px',
+  },
+  daysList: {
+    display: 'flex',
+    gap: '8px',
+    flexWrap: 'wrap',
+  },
+  dayBadge: {
+    padding: '8px 14px',
+    borderRadius: '20px',
+    border: '1px solid',
+    fontSize: '12px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    outline: 'none',
+    transition: 'all 0.2s',
+  },
   insightsCard: {
     backgroundColor: 'rgba(255, 255, 255, 0.02)',
-    border: '1px solid rgba(255, 255, 255, 0.05)',
+    border: '1px solid var(--border-card)',
     borderRadius: '12px',
     padding: '16px',
     marginBottom: '24px',
   },
   insightsTitle: {
-    fontSize: '13px',
-    color: '#38bdf8',
+    fontSize: '12px',
+    color: 'var(--color-accent)',
     textTransform: 'uppercase',
     letterSpacing: '0.05em',
     marginBottom: '10px',
@@ -236,117 +532,62 @@ const styles = {
     listStyle: 'none',
   },
   insightItem: {
-    fontSize: '13px',
-    color: '#e2e8f0',
+    fontSize: '12px',
+    color: 'var(--color-text-main)',
     marginBottom: '8px',
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
   },
   bullet: {
-    color: '#fbbf24',
-  },
-  formGroup: {
-    marginBottom: '24px',
-  },
-  label: {
-    display: 'block',
-    fontSize: '14px',
-    color: '#cbd5e1',
-    marginBottom: '8px',
-  },
-  textInput: {
-    width: '100%',
-    backgroundColor: 'rgba(15, 23, 42, 0.6)',
-    border: '1px solid rgba(255, 255, 255, 0.1)',
-    borderRadius: '8px',
-    padding: '12px 16px',
-    fontSize: '14px',
-    color: '#f8fafc',
-    outline: 'none',
-    transition: 'border-color 0.2s',
-    ':focus': {
-      borderColor: '#6366f1',
-    }
-  },
-  rangeInput: {
-    width: '100%',
-    cursor: 'pointer',
-    accentColor: '#6366f1',
-  },
-  rangeLabels: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    fontSize: '11px',
-    color: '#64748b',
-    marginTop: '4px',
+    color: 'var(--color-warning)',
   },
   scopingBox: {
-    border: '1px solid rgba(255, 255, 255, 0.06)',
-    borderRadius: '12px',
-    overflow: 'hidden',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
     marginBottom: '24px',
   },
-  scopingHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '10px 16px',
-    backgroundColor: 'rgba(255, 255, 255, 0.02)',
-    borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-    fontSize: '11px',
-    textTransform: 'uppercase',
-    color: '#64748b',
-    letterSpacing: '0.05em',
+  calendarCard: {
+    backgroundColor: 'var(--bg-main)',
+    border: '1px solid var(--border-card)',
+    borderRadius: '10px',
+    padding: '16px',
   },
   calendarRow: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '14px 16px',
-    borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
-    cursor: 'pointer',
-    transition: 'background-color 0.2s',
-    ':hover': {
-      backgroundColor: 'rgba(255, 255, 255, 0.01)',
-    }
-  },
-  calendarInfo: {
-    display: 'flex',
-    alignItems: 'center',
+    flexWrap: 'wrap',
     gap: '12px',
-  },
-  checkbox: {
-    width: '16px',
-    height: '16px',
-    cursor: 'pointer',
-    accentColor: '#6366f1',
   },
   calendarName: {
     fontSize: '14px',
-    fontWeight: '500',
-    color: '#f1f5f9',
+    fontWeight: '600',
+    color: 'var(--color-text-main)',
   },
-  sensitiveLabel: {
-    fontSize: '10px',
-    color: '#f59e0b',
-    display: 'block',
+  sensitiveDesc: {
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
     marginTop: '2px',
   },
-  scopeBadgeAllowed: {
-    fontSize: '11px',
-    color: '#34d399',
-    backgroundColor: 'rgba(52, 211, 153, 0.08)',
-    padding: '4px 8px',
-    borderRadius: '6px',
-    border: '1px solid rgba(52, 211, 153, 0.15)',
+  selectors: {
+    display: 'flex',
+    gap: '8px',
   },
-  scopeBadgeBlocked: {
-    fontSize: '11px',
-    color: '#94a3b8',
-    backgroundColor: 'rgba(148, 163, 184, 0.05)',
-    padding: '4px 8px',
+  inlineSelect: {
+    backgroundColor: 'var(--bg-sidebar)',
+    border: '1px solid var(--input-border)',
+    color: 'var(--color-text-main)',
+    padding: '6px 12px',
     borderRadius: '6px',
-    border: '1px solid rgba(148, 163, 184, 0.08)',
+    fontSize: '12px',
+    outline: 'none',
+  },
+  icalInputRow: {
+    marginTop: '12px',
+    borderTop: '1px solid var(--border-divider)',
+    paddingTop: '12px',
   },
   trustBanner: {
     display: 'flex',
@@ -363,12 +604,12 @@ const styles = {
   },
   trustText: {
     fontSize: '12px',
-    color: '#a7f3d0',
+    color: 'var(--color-success)',
     lineHeight: '1.4',
   },
   primaryButton: {
     width: '100%',
-    backgroundColor: '#6366f1',
+    backgroundColor: 'var(--color-accent)',
     color: '#ffffff',
     border: 'none',
     borderRadius: '8px',
@@ -376,18 +617,17 @@ const styles = {
     fontSize: '14px',
     fontWeight: '600',
     cursor: 'pointer',
-    boxShadow: '0 4px 12px rgba(99, 102, 241, 0.3)',
     transition: 'all 0.2s',
     outline: 'none',
-    ':hover': {
-      backgroundColor: '#4f46e5',
-      transform: 'translateY(-1px)',
+    ':disabled': {
+      opacity: 0.5,
+      cursor: 'not-allowed',
     }
   },
   secondaryButton: {
     backgroundColor: 'transparent',
-    color: '#94a3b8',
-    border: '1px solid rgba(255, 255, 255, 0.1)',
+    color: 'var(--color-text-muted)',
+    border: '1px solid var(--input-border)',
     borderRadius: '8px',
     padding: '12px 20px',
     fontSize: '14px',
@@ -395,9 +635,6 @@ const styles = {
     cursor: 'pointer',
     transition: 'background-color 0.2s',
     outline: 'none',
-    ':hover': {
-      backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    }
   },
   buttonGroup: {
     display: 'flex',
