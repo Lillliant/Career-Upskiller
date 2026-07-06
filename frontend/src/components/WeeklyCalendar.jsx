@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useAppState } from '../stateManager';
+import { useAppState, appState } from '../stateManager';
+import { stageWeeklySchedule } from '../scheduleApi';
+
+/** Format a Date as ISO 8601 with the app's fixed -04:00 offset. */
+function toLocalOffsetISO(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}-04:00`
+  );
+}
 
 export default function WeeklyCalendar({ onApprove, onCancel }) {
   const [state, setState] = useAppState();
@@ -7,6 +17,8 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
   const [draggedEventId, setDraggedEventId] = useState(null);
   const [draggedProposedIdx, setDraggedProposedIdx] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isStaging, setIsStaging] = useState(false);
+  const [stageMessage, setStageMessage] = useState('');
   const [contextMenu, setContextMenu] = useState(null);
   const [hoveredEvent, setHoveredEvent] = useState(null);
 
@@ -80,9 +92,11 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
   const totalMinutes = (endHour - startHour) * 60;
   const containerHeight = (totalMinutes / 15) * slotHeight;
 
-  // Generate 7 days starting from base date + currentWeekOffset * 7 days
-  const baseDate = new Date(2026, 6, 2); // July 2, 2026
-  baseDate.setDate(baseDate.getDate() + state.currentWeekOffset * 7);
+  // Generate 7 days for the Sunday-start week containing today, shifted by currentWeekOffset
+  const today = new Date();
+  const baseDate = new Date(today);
+  baseDate.setDate(today.getDate() - today.getDay() + state.currentWeekOffset * 7);
+  baseDate.setHours(0, 0, 0, 0);
   
   const weekDays = Array.from({ length: 7 }).map((_, i) => {
     const d = new Date(baseDate);
@@ -183,8 +197,8 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
 
       updated[draggedProposedIdx] = {
         ...event,
-        start: newStart.toISOString(),
-        end: newEnd.toISOString()
+        start: toLocalOffsetISO(newStart),
+        end: toLocalOffsetISO(newEnd)
       };
       setState({ proposedEvents: updated });
     } else {
@@ -224,7 +238,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
       const end = new Date(evt.end);
       const newEnd = new Date(end.getTime() + deltaMins * 60 * 1000);
       if (newEnd >= new Date(start.getTime() + 15 * 60 * 1000)) {
-        updated[proposedIdx] = { ...evt, end: newEnd.toISOString() };
+        updated[proposedIdx] = { ...evt, end: toLocalOffsetISO(newEnd) };
         setState({ proposedEvents: updated });
       }
     } else {
@@ -264,7 +278,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
         const start = new Date(event.start);
         const newEnd = new Date(initialEnd.getTime() + deltaMins * 60 * 1000);
         if (newEnd >= new Date(start.getTime() + 15 * 60 * 1000)) {
-          latestEndISO = newEnd.toISOString();
+          latestEndISO = isProposed ? toLocalOffsetISO(newEnd) : newEnd.toISOString();
           if (isProposed && proposedIdx !== null) {
             const updated = [...state.proposedEvents];
             updated[proposedIdx] = { ...updated[proposedIdx], end: latestEndISO };
@@ -299,15 +313,16 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
 
   const executeApproval = async () => {
     setIsSubmitting(true);
-    const selectedScopes = state.targetCalendars
+    const currentState = appState.getState();
+    const selectedScopes = currentState.targetCalendars
       .filter(c => c.selected)
       .map(c => c.id);
 
     const envelope = {
-      transaction_id: state.transactionId || 'tx-mock-123',
-      token: state.token || 'token-mock-123',
+      transaction_id: currentState.transactionId || 'tx-mock-123',
+      token: currentState.token || 'token-mock-123',
       action: 'approve',
-      proposed_events: state.proposedEvents,
+      proposed_events: currentState.proposedEvents,
       calendar_scopes: selectedScopes
     };
 
@@ -320,13 +335,16 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     }
   };
 
-  const executeReject = () => {
-    onCancel({
-      transaction_id: state.transactionId,
-      token: state.token,
-      action: 'reject'
-    });
-    setState({ proposedEvents: [] });
+  const executeReject = async () => {
+    try {
+      await onCancel({
+        transaction_id: state.transactionId,
+        token: state.token,
+        action: 'reject'
+      });
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   // Navigations
@@ -340,6 +358,27 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
 
   const handleCurrentWeek = () => {
     setState({ currentWeekOffset: 0 });
+  };
+
+  const handleScheduleWeek = async () => {
+    setIsStaging(true);
+    setStageMessage('');
+    try {
+      const data = await stageWeeklySchedule(setState);
+      const eventCount = (data.proposed_events || []).length;
+      if (eventCount === 0) {
+        setStageMessage(data.reason || 'No events were staged for this week.');
+      } else {
+        setStageMessage(
+          `Staged ${eventCount} learning block${eventCount === 1 ? '' : 's'} from ${data.task_count || eventCount} task(s). Review and approve below.`
+        );
+      }
+    } catch (err) {
+      console.error('Failed to stage weekly schedule:', err);
+      alert(err.message || 'Failed to stage weekly schedule.');
+    } finally {
+      setIsStaging(false);
+    }
   };
 
   // Formatted date string for week title
@@ -359,17 +398,34 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
           <button onClick={handlePrevWeek} style={styles.navBtn}>◀ Prev Week</button>
           <button onClick={handleCurrentWeek} style={{ ...styles.navBtn, fontWeight: '700' }}>Current Week</button>
           <button onClick={handleNextWeek} style={styles.navBtn}>Next Week ▶</button>
+          <button
+            onClick={handleScheduleWeek}
+            style={styles.scheduleBtn}
+            disabled={isStaging}
+            title="Build this week's learning blocks from task due dates across your projects"
+          >
+            {isStaging ? 'Scheduling…' : '📆 Schedule This Week'}
+          </button>
           <span style={styles.weekRangeText}>{startOfWeekStr} – {endOfWeekStr}</span>
         </div>
       </div>
+
+      {stageMessage && (
+        <div style={styles.stageMessage} className="glass-card">
+          {stageMessage}
+        </div>
+      )}
 
       {/* Scarcity / Staging Zero-Trust Banner */}
       {state.proposedEvents.length > 0 && state.currentWeekOffset === 0 && (
         <div style={styles.approvalWidget} className="glass-card">
           <div style={styles.approvalHeader}>
-            <div style={styles.badge}>🔐 Zero-Trust Stage Staged</div>
+            <div style={styles.badge}>🔐 New Events Pending Your Approval</div>
             <div style={styles.txId}>Transaction: {state.transactionId}</div>
           </div>
+          <p style={styles.approvalHint}>
+            Review the proposed schedule below, then approve or reject before these events are added to your calendar.
+          </p>
           
           {state.scarcityFlag && (
             <div style={styles.scarcityWarning}>
@@ -659,7 +715,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
             <div style={{ fontWeight: '700', marginBottom: '4px', color: 'var(--color-accent)' }}>
               {hoveredEvent.event.summary}
             </div>
-            <div style={{ color: '#cbd5e1', lineHeight: '1.4' }}>
+            <div style={{ color: '#cbd5e1', lineHeight: '1.4', whiteSpace: 'pre-line' }}>
               {hoveredEvent.event.description || 'No description provided.'}
             </div>
           </div>
@@ -708,6 +764,25 @@ const styles = {
     fontSize: '12px',
     cursor: 'pointer',
   },
+  scheduleBtn: {
+    backgroundColor: 'rgba(99, 102, 241, 0.15)',
+    border: '1px solid var(--color-accent)',
+    borderRadius: '6px',
+    color: 'var(--color-accent)',
+    padding: '6px 14px',
+    fontSize: '12px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+  stageMessage: {
+    marginBottom: '16px',
+    padding: '12px 16px',
+    borderRadius: '10px',
+    fontSize: '13px',
+    color: 'var(--color-text-main)',
+    border: '1px solid var(--input-border)',
+  },
   weekRangeText: {
     fontSize: '13px',
     fontWeight: '600',
@@ -725,7 +800,13 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: '12px',
+    marginBottom: '8px',
+  },
+  approvalHint: {
+    fontSize: '12px',
+    color: 'var(--color-text-muted)',
+    margin: '0 0 12px 0',
+    lineHeight: '1.4',
   },
   badge: {
     fontSize: '12px',
@@ -883,9 +964,9 @@ const styles = {
     fontSize: '9px',
     color: 'var(--color-text-muted)',
     margin: '2px 0 0 0',
-    whiteSpace: 'nowrap',
+    whiteSpace: 'pre-line',
     overflow: 'hidden',
-    textOverflow: 'ellipsis',
+    lineHeight: '1.3',
   },
   evtControls: {
     display: 'flex',

@@ -275,13 +275,14 @@ class LocalJsonStateStore(BaseStateStore):
 
     def update_user_profile(self, profile: dict[str, Any]) -> None:
         current = self.get_user_profile()
+        goals_updated = "goals" in profile
         current.update(profile)
         update_tasks_allocated_time(current)
-        if "goals" in current:
-            for g in current["goals"]:
+        if goals_updated:
+            for g in current.get("goals", []):
                 if "sub_projects" in g:
                     g["sub_projects"] = adjust_past_due_dates(g["sub_projects"])
-        current = pace_and_schedule_goals(current)
+            current = pace_and_schedule_goals(current)
         self._write_json(self.profile_path, current)
 
     def get_work_log(self) -> list[dict[str, Any]]:
@@ -315,7 +316,6 @@ class LocalJsonStateStore(BaseStateStore):
             updated_goals.append(goal_data)
         profile["goals"] = updated_goals
         update_tasks_allocated_time(profile)
-        profile = pace_and_schedule_goals(profile)
         self._write_json(self.profile_path, profile)
 
     def create_goal(self, goal_data: dict[str, Any]) -> None:

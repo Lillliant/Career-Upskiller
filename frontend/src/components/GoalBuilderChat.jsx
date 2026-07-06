@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppState } from '../stateManager';
+import { stageWeeklySchedule } from '../scheduleApi';
 
 // Safe Markdown-to-React Renderer for agent responses
 function MarkdownRenderer({ text }) {
@@ -306,34 +307,12 @@ export default function GoalBuilderChat() {
       });
       if (res.ok) {
         const data = await res.json();
-        setState({ goals: data.goals, activeTab: 'projects', activeGoalId: data.goals[data.goals.length - 1]?.id });
-        
-        // Trigger schedule staging on backend
-        await fetch('/run', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            app_name: 'app',
-            user_id: 'test_user_123',
-            session_id: 'active_session_123',
-            new_message: {
-              role: 'user',
-              parts: [{ text: "Re-stage schedule with new goals." }]
-            }
-          })
-        });
+        setState({ goals: data.goals, activeTab: 'projects', activeGoalId: data.goals[data.goals.length - 1]?.id, openProjectDetail: true });
 
-        // Fetch updated profile with proposed events
-        const profileRes = await fetch('/api/profile');
-        if (profileRes.ok) {
-          const profile = await profileRes.json();
-          setState({
-            proposedEvents: profile.proposed_events || [],
-            scarcityFlag: profile.scarcity_flag || false,
-            reason: profile.reason || '',
-            transactionId: profile.transaction_id || '',
-            token: profile.token || ''
-          });
+        try {
+          await stageWeeklySchedule(setState);
+        } catch (err) {
+          console.error("Failed to stage schedule after adding goal:", err);
         }
       }
     } catch (err) {

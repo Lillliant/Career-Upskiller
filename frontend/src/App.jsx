@@ -6,6 +6,7 @@ import SkillsManager from './components/SkillsManager';
 import ProjectsManager from './components/ProjectsManager';
 import GoalBuilderChat from './components/GoalBuilderChat';
 import AnalyticsSummary from './components/AnalyticsSummary';
+import { approveWeeklySchedule, rejectWeeklySchedule } from './scheduleApi';
 
 export default function App() {
   const [state, setState] = useAppState();
@@ -116,38 +117,9 @@ export default function App() {
     
     const updatedLogs = [...state.logs, logEntry];
 
-    // Live Mode: Dispatch to FastAPI backend
     try {
-      const response = await fetch('/run', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          app_name: 'app',
-          user_id: 'test_user_123',
-          session_id: 'active_session_123',
-          new_message: {
-            role: 'user',
-            parts: [
-              {
-                function_response: {
-                  id: 'approval_payload',
-                  name: 'adk_request_input',
-                  response: envelope
-                }
-              }
-            ]
-          }
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`FastAPI response error: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.log("Live execution resume response:", data);
+      const data = await approveWeeklySchedule(envelope);
+      console.log("Schedule approval response:", data);
       
       setState({ 
         logs: [...updatedLogs, {
@@ -160,28 +132,40 @@ export default function App() {
         scarcityFlag: false,
         reason: '',
         transactionId: '',
-        token: ''
+        token: '',
+        scheduledEvents: data.scheduled_events || state.scheduledEvents,
       });
 
-      // Trigger refresh immediately
-      fetchAllData();
+      await fetchAllData();
     } catch (err) {
-      console.error("Failed to dispatch live handshake:", err);
-      alert(`Failed to resume backend agent. Make sure fast_api_app.py is running. Error: ${err.message}`);
+      console.error("Failed to dispatch schedule approval:", err);
+      alert(`Failed to approve schedule: ${err.message}`);
       throw err;
     }
   };
 
-  const handleCancelHandshake = (envelope) => {
+  const handleCancelHandshake = async (envelope) => {
     const logEntry = {
       timestamp: new Date().toISOString(),
       action: 'Transaction Rejected & Cancelled',
       payload: envelope
     };
-    setState({ 
-      logs: [...state.logs, logEntry],
-      isSubmitted: false
-    });
+
+    try {
+      await rejectWeeklySchedule(envelope);
+      setState({ 
+        logs: [...state.logs, logEntry],
+        isSubmitted: false,
+        proposedEvents: [],
+        scarcityFlag: false,
+        reason: '',
+        transactionId: '',
+        token: '',
+      });
+    } catch (err) {
+      console.error("Failed to reject schedule:", err);
+      alert(`Failed to reject schedule: ${err.message}`);
+    }
   };
 
   const handleReset = async () => {

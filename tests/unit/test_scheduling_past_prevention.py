@@ -5,6 +5,7 @@ import asyncio
 
 from app.state_store import state_store, adjust_past_due_dates
 from app.orchestrator import stage_schedule
+from app.scheduling_utils import parse_duration, find_task_due_date_for_event
 from google.adk.agents.context import Context
 
 def test_adjust_past_due_dates():
@@ -113,6 +114,93 @@ def test_state_store_auto_adjust():
     assert len(goals) == 1
     assert goals[0]["sub_projects"][0]["dueDate"] == today.isoformat()
 
+
+def test_update_goal_preserves_manual_edits():
+    state_store.reset()
+
+    future_milestone = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+    future_task = (datetime.date.today() + datetime.timedelta(days=25)).isoformat()
+
+    state_store.create_goal({
+        "title": "Original Goal",
+        "description": "Original description",
+        "status": "in-progress",
+        "sub_projects": [{
+            "title": "Milestone 1",
+            "description": "M1 desc",
+            "dueDate": (datetime.date.today() + datetime.timedelta(days=7)).isoformat(),
+            "completed": False,
+            "tasks": [{
+                "title": "Task 1",
+                "description": "T1 desc",
+                "estimated_time": "2 hours",
+                "dueDate": (datetime.date.today() + datetime.timedelta(days=5)).isoformat(),
+                "completed": False,
+            }],
+        }],
+    })
+
+    goal_id = state_store.get_goals()[0]["id"]
+    state_store.update_goal(goal_id, {
+        "title": "Updated Goal",
+        "description": "Updated description",
+        "sub_projects": [{
+            "title": "Updated Milestone",
+            "description": "Updated M1 desc",
+            "dueDate": future_milestone,
+            "completed": False,
+            "tasks": [{
+                "title": "Updated Task",
+                "description": "Updated T1 desc",
+                "estimated_time": "3 hours",
+                "dueDate": future_task,
+                "completed": False,
+            }],
+        }],
+    })
+
+    updated = state_store.get_goals()[0]
+    assert updated["title"] == "Updated Goal"
+    assert updated["description"] == "Updated description"
+    milestone = updated["sub_projects"][0]
+    assert milestone["title"] == "Updated Milestone"
+    assert milestone["description"] == "Updated M1 desc"
+    assert milestone["dueDate"] == future_milestone
+    task = milestone["tasks"][0]
+    assert task["title"] == "Updated Task"
+    assert task["description"] == "Updated T1 desc"
+    assert task["estimated_time"] == "3 hours"
+    assert task["dueDate"] == future_task
+
+
+def test_update_user_profile_skips_goal_reschedule_for_proposals():
+    state_store.reset()
+    future_task = (datetime.date.today() + datetime.timedelta(days=20)).isoformat()
+    state_store.create_goal({
+        "title": "Test Project",
+        "status": "in-progress",
+        "sub_projects": [{
+            "title": "M1",
+            "dueDate": future_task,
+            "completed": False,
+            "tasks": [{
+                "title": "Task A",
+                "estimated_time": "1 hour",
+                "dueDate": future_task,
+                "completed": False,
+            }],
+        }],
+    })
+
+    state_store.update_user_profile({
+        "proposed_events": [{"id": "evt-test", "summary": "Learning: Test"}],
+        "transaction_id": "tx-test",
+        "token": "token-test",
+    })
+
+    saved = state_store.get_goals()[0]
+    assert saved["sub_projects"][0]["tasks"][0]["dueDate"] == future_task
+
 @pytest.mark.asyncio
 async def test_stage_schedule_future_only():
     # Mock profile and context to run stage_schedule
@@ -159,7 +247,7 @@ async def test_stage_schedule_future_only():
 
 
 def test_parse_duration():
-    from app.orchestrator import parse_duration
+    from app.scheduling_utils import parse_duration
     assert parse_duration("2 hours") == 120
     assert parse_duration("1.5 hours") == 90
     assert parse_duration("30 minutes") == 30
@@ -168,7 +256,7 @@ def test_parse_duration():
 
 
 def test_find_task_due_date_for_event():
-    from app.orchestrator import find_task_due_date_for_event
+    from app.scheduling_utils import find_task_due_date_for_event
     goals = [
         {
             "title": "Python Loop",

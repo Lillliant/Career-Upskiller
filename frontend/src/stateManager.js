@@ -27,6 +27,7 @@ class AppStateStore {
       // Goals list
       goals: [],
       activeGoalId: null,
+      openProjectDetail: false,
 
       // Schedule & unified events
       transactionId: '',

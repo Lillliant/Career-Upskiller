@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAppState } from '../stateManager';
+import { stageWeeklySchedule } from '../scheduleApi';
 
 export default function ProjectsManager() {
   const [state, setState] = useAppState();
@@ -29,6 +30,9 @@ export default function ProjectsManager() {
 
   // Filter states
   const [filterStatus, setFilterStatus] = useState('All');
+
+  // List vs detail navigation
+  const [view, setView] = useState('list');
 
   // Skill Editor states
   const [newSkillName, setNewSkillName] = useState('');
@@ -68,6 +72,16 @@ export default function ProjectsManager() {
     };
     loadGoals();
   }, [state.onboarded]);
+
+  useEffect(() => {
+    if (state.openProjectDetail && state.activeGoalId) {
+      const goal = state.goals.find(g => g.id === state.activeGoalId);
+      if (goal) {
+        setView('detail');
+      }
+      setState({ openProjectDetail: false });
+    }
+  }, [state.openProjectDetail, state.activeGoalId, state.goals]);
 
   const activeGoal = state.goals.find(g => g.id === state.activeGoalId) || state.goals[0];
 
@@ -115,6 +129,23 @@ export default function ProjectsManager() {
 
   const sortedGoals = getSortedAndFilteredGoals();
 
+  const openProject = (goalId) => {
+    setState({ activeGoalId: goalId });
+    setView('detail');
+    setIsEditingGoal(false);
+    setEditingMilestoneIdx(null);
+    setEditingTaskKey(null);
+    setActiveAddTaskId(null);
+  };
+
+  const goBackToList = () => {
+    setView('list');
+    setIsEditingGoal(false);
+    setEditingMilestoneIdx(null);
+    setEditingTaskKey(null);
+    setActiveAddTaskId(null);
+  };
+
   const handleCreateGoal = async (e) => {
     e.preventDefault();
     if (!newGoalTitle.trim()) return;
@@ -138,34 +169,12 @@ export default function ProjectsManager() {
         const data = await res.json();
         setState({ goals: data.goals });
         const newGoal = data.goals[data.goals.length - 1];
-        if (newGoal) setState({ activeGoalId: newGoal.id });
+        if (newGoal) openProject(newGoal.id);
 
-        // Trigger schedule staging on backend
-        await fetch('/run', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            app_name: 'app',
-            user_id: 'test_user_123',
-            session_id: 'active_session_123',
-            new_message: {
-              role: 'user',
-              parts: [{ text: "Re-stage schedule with new goals." }]
-            }
-          })
-        });
-
-        // Fetch updated profile with proposed events
-        const profileRes = await fetch('/api/profile');
-        if (profileRes.ok) {
-          const profile = await profileRes.json();
-          setState({
-            proposedEvents: profile.proposed_events || [],
-            scarcityFlag: profile.scarcity_flag || false,
-            reason: profile.reason || '',
-            transactionId: profile.transaction_id || '',
-            token: profile.token || ''
-          });
+        try {
+          await stageWeeklySchedule(setState);
+        } catch (err) {
+          console.error("Failed to stage schedule after goal creation:", err);
         }
       }
     } catch (err) {
@@ -378,6 +387,7 @@ export default function ProjectsManager() {
         setState({ goals: data.goals });
         if (state.activeGoalId === goalId) {
           setState({ activeGoalId: data.goals[0]?.id || null });
+          setView('list');
         }
         setIsEditingGoal(false);
       }
@@ -569,110 +579,116 @@ export default function ProjectsManager() {
     setIsSubmitting(false);
   };
 
-  return (
-    <div style={styles.container} className="animate-fade-in">
-      {/* Sidebar: Goals List & Creation */}
-      <div style={styles.sidebar}>
-        {/* Create Goal Form */}
-        <div style={styles.createBox} className="glass-card">
-          <h3 style={styles.sectionTitle}>Add New Goal 🎯</h3>
-          <form onSubmit={handleCreateGoal} style={styles.form}>
-            <input 
-              type="text" 
-              value={newGoalTitle} 
-              onChange={(e) => setNewGoalTitle(e.target.value)} 
-              placeholder="Goal Title (e.g. Master LangChain)"
-              style={styles.textInput}
-              required
-            />
-            <input 
-              type="text" 
-              value={newGoalDesc} 
-              onChange={(e) => setNewGoalDesc(e.target.value)} 
-              placeholder="Description"
-              style={styles.textInput}
-            />
-            <button type="submit" style={styles.submitBtn}>
-              Create Goal
-            </button>
-          </form>
-        </div>
+  if (view === 'list') {
+    return (
+      <div style={styles.container} className="animate-fade-in">
+        <div style={styles.listPage}>
+          <div style={styles.pageHeader}>
+            <h2 style={styles.pageTitle}>Projects & Goals</h2>
+            <p style={styles.pageSubtitle}>Manage your learning projects, milestones, and skill mappings.</p>
+          </div>
 
-        {/* Goals List Header with Sorting */}
-        <div style={styles.goalsListHeader}>
-          <span style={styles.listTitle}>Project List</span>
-          <div style={styles.sortContainer}>
-            <label style={styles.sortLabel}>Status:</label>
-            <select 
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
-              style={styles.sortSelect}
-            >
-              <option value="All">All</option>
-              <option value="to-do">To-do</option>
-              <option value="in-progress">In-progress</option>
-              <option value="done">Done</option>
-              <option value="archived">Archived</option>
-            </select>
+          <div style={styles.createBox} className="glass-card">
+            <h3 style={styles.sectionTitle}>Add New Goal 🎯</h3>
+            <form onSubmit={handleCreateGoal} style={styles.createForm}>
+              <input 
+                type="text" 
+                value={newGoalTitle} 
+                onChange={(e) => setNewGoalTitle(e.target.value)} 
+                placeholder="Goal Title (e.g. Master LangChain)"
+                style={styles.textInput}
+                required
+              />
+              <input 
+                type="text" 
+                value={newGoalDesc} 
+                onChange={(e) => setNewGoalDesc(e.target.value)} 
+                placeholder="Description"
+                style={styles.textInput}
+              />
+              <button type="submit" style={styles.submitBtn}>
+                Create Goal
+              </button>
+            </form>
+          </div>
 
-            <label style={styles.sortLabel}>Sort:</label>
-            <select 
-              value={sortBy} 
-              onChange={(e) => setSortBy(e.target.value)}
-              style={styles.sortSelect}
-            >
-              <option value="status">Status</option>
-              <option value="duedate">Due Date</option>
-              <option value="skills">Skills count</option>
-            </select>
+          <div style={styles.goalsListHeader}>
+            <span style={styles.listTitle}>Your Projects</span>
+            <div style={styles.sortContainer}>
+              <label style={styles.sortLabel}>Status:</label>
+              <select 
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                style={styles.sortSelect}
+              >
+                <option value="All">All</option>
+                <option value="to-do">To-do</option>
+                <option value="in-progress">In-progress</option>
+                <option value="done">Done</option>
+                <option value="archived">Archived</option>
+              </select>
+
+              <label style={styles.sortLabel}>Sort:</label>
+              <select 
+                value={sortBy} 
+                onChange={(e) => setSortBy(e.target.value)}
+                style={styles.sortSelect}
+              >
+                <option value="status">Status</option>
+                <option value="duedate">Due Date</option>
+                <option value="skills">Skills count</option>
+              </select>
+            </div>
+          </div>
+
+          <div style={styles.goalsGrid}>
+            {sortedGoals.length === 0 ? (
+              <div style={styles.emptyText} className="glass-card">No goals created yet. Create one above to get started.</div>
+            ) : (
+              sortedGoals.map((g) => (
+                <div 
+                  key={g.id} 
+                  onClick={() => openProject(g.id)}
+                  style={styles.goalCard}
+                  className="glass-card"
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openProject(g.id); }}
+                >
+                  <div style={styles.goalCardHeader}>
+                    <h4 style={styles.goalTitle}>{g.title}</h4>
+                    <span style={{
+                      ...styles.statusBadge,
+                      backgroundColor: g.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : g.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(120, 120, 120, 0.15)',
+                      color: g.status === 'done' ? 'var(--color-success)' : g.status === 'in-progress' ? 'var(--color-accent)' : 'var(--color-text-muted)'
+                    }}>
+                      {g.status}
+                    </span>
+                  </div>
+                  <p style={styles.goalDesc}>{g.description || 'No description'}</p>
+                  <div style={styles.goalFooter}>
+                    <span>📋 {(g.sub_projects || []).length} milestones</span>
+                    <span>⚙️ {(g.skills || []).length} skills</span>
+                    <span>⏱️ {g.time_spent_mins || 0}m logged</span>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
-
-        {/* Goals Cards Stack */}
-        <div style={styles.goalsBox}>
-          {sortedGoals.length === 0 ? (
-            <div style={styles.emptyText}>No goals created yet. Create above to get started.</div>
-          ) : (
-            sortedGoals.map((g) => (
-              <div 
-                key={g.id} 
-                onClick={() => setState({ activeGoalId: g.id })}
-                style={{
-                  ...styles.goalCard,
-                  borderColor: state.activeGoalId === g.id || (!state.activeGoalId && activeGoal?.id === g.id)
-                    ? 'var(--color-accent)' 
-                    : 'var(--border-card)',
-                  backgroundColor: state.activeGoalId === g.id || (!state.activeGoalId && activeGoal?.id === g.id)
-                    ? 'rgba(99, 102, 241, 0.05)'
-                    : 'var(--bg-card)'
-                }}
-              >
-                <div style={styles.goalCardHeader}>
-                  <h4 style={styles.goalTitle}>{g.title}</h4>
-                  <span style={{
-                    ...styles.statusBadge,
-                    backgroundColor: g.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : g.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(120, 120, 120, 0.15)',
-                    color: g.status === 'done' ? 'var(--color-success)' : g.status === 'in-progress' ? 'var(--color-accent)' : 'var(--color-text-muted)'
-                  }}>
-                    {g.status}
-                  </span>
-                </div>
-                <p style={styles.goalDesc}>{g.description}</p>
-                <div style={styles.goalFooter}>
-                  <span>⚙️ {(g.skills || []).length} skills mapped</span>
-                  <span>⏱️ {g.time_spent_mins || 0}m logged</span>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
       </div>
+    );
+  }
 
-      {/* Main Details Panel */}
-      <div style={styles.detailPanel}>
+  return (
+    <div style={styles.container} className="animate-fade-in">
+      <div style={styles.detailPage}>
+        <button type="button" onClick={goBackToList} style={styles.backBtn}>
+          ← Back to Projects
+        </button>
+
         {activeGoal ? (
           <div style={styles.detailCard} className="glass-card">
-            {/* Header: Title & status select */}
             <div style={styles.detailHeader}>
               {isEditingGoal ? (
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px', marginRight: '16px' }}>
@@ -1215,7 +1231,10 @@ export default function ProjectsManager() {
           </div>
         ) : (
           <div style={styles.emptyCard} className="glass-card">
-            <span>🎯 Select a project from the left side panel to review milestones, map skills, and submit reflections.</span>
+            <span>🎯 This project could not be found.</span>
+            <button type="button" onClick={goBackToList} style={{ ...styles.backBtn, marginTop: '16px' }}>
+              ← Back to Projects
+            </button>
           </div>
         )}
       </div>
@@ -1225,22 +1244,53 @@ export default function ProjectsManager() {
 
 const styles = {
   container: {
-    display: 'flex',
-    gap: '24px',
     width: '100%',
-    maxWidth: '1000px',
+    maxWidth: '900px',
     margin: '0 auto',
-    alignItems: 'flex-start',
   },
-  sidebar: {
-    width: '320px',
+  listPage: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '20px',
+  },
+  detailPage: {
     display: 'flex',
     flexDirection: 'column',
     gap: '16px',
-    flexShrink: 0,
+  },
+  pageHeader: {
+    marginBottom: '4px',
+  },
+  pageTitle: {
+    fontSize: '22px',
+    color: 'var(--color-text-main)',
+    margin: '0 0 4px 0',
+  },
+  pageSubtitle: {
+    fontSize: '13px',
+    color: 'var(--color-text-muted)',
+    margin: 0,
+  },
+  backBtn: {
+    alignSelf: 'flex-start',
+    background: 'none',
+    border: '1px solid var(--border-card)',
+    borderRadius: '8px',
+    color: 'var(--color-accent)',
+    cursor: 'pointer',
+    fontSize: '13px',
+    fontWeight: '600',
+    padding: '8px 14px',
+    transition: 'all 0.2s',
   },
   createBox: {
     padding: '20px',
+  },
+  createForm: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr auto',
+    gap: '10px',
+    alignItems: 'center',
   },
   sectionTitle: {
     fontSize: '15px',
@@ -1302,17 +1352,17 @@ const styles = {
     fontSize: '10px',
     outline: 'none',
   },
-  goalsBox: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '12px',
+  goalsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+    gap: '16px',
   },
   goalCard: {
     borderRadius: '12px',
-    border: '1px solid',
     padding: '16px',
     cursor: 'pointer',
     transition: 'all 0.2s',
+    border: '1px solid var(--border-card)',
   },
   goalCardHeader: {
     display: 'flex',
@@ -1343,6 +1393,8 @@ const styles = {
   goalFooter: {
     display: 'flex',
     justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: '8px',
     fontSize: '11px',
     color: 'var(--color-text-muted)',
     marginTop: '12px',
@@ -1354,9 +1406,6 @@ const styles = {
     color: 'var(--color-text-muted)',
     textAlign: 'center',
     padding: '20px',
-  },
-  detailPanel: {
-    flex: 1,
   },
   detailCard: {
     padding: '24px',

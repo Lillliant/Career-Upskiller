@@ -95,6 +95,10 @@ export default function SkillsManager() {
         </div>
       </div>
 
+      <p style={styles.resultCount}>
+        {filteredSkills.length} of {uniqueSkills.length} {uniqueSkills.length === 1 ? 'skill' : 'skills'}
+      </p>
+
       {/* Skills Grid */}
       <div style={styles.grid}>
         {filteredSkills.length === 0 ? (
@@ -168,7 +172,8 @@ export default function SkillsManager() {
                               e.stopPropagation(); // Avoid toggling expansion
                               setState({ 
                                 activeTab: 'projects',
-                                activeGoalId: proj.id 
+                                activeGoalId: proj.id,
+                                openProjectDetail: true,
                               });
                             }}
                             style={styles.viewProjectBtn}
@@ -292,6 +297,12 @@ const styles = {
     color: 'var(--color-text-muted)',
     marginTop: '2px',
     fontWeight: 'normal',
+  },
+  resultCount: {
+    fontSize: '13px',
+    color: 'var(--color-text-muted)',
+    margin: '0 0 16px 0',
+    fontWeight: '600',
   },
   headerRight: {
     display: 'flex',

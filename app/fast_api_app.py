@@ -69,6 +69,13 @@ class ReflectionSubmit(BaseModel):
     reflection_text: str
     success_rating: int | None = None
 
+class ScheduleApprovalEnvelope(BaseModel):
+    transaction_id: str
+    token: str
+    action: str
+    proposed_events: list[dict[str, Any]] | None = None
+    calendar_scopes: list[str] | None = None
+
 setup_telemetry()
 
 # Resilient Logger and Credentials Fallback
@@ -209,15 +216,56 @@ def reset_state():
     state_store.reset()
     return {"status": "success", "message": "State store has been reset."}
 
+
+@app.post("/api/schedule/stage")
+def stage_weekly_schedule():
+    """Stage this week's learning blocks from task due dates across active projects."""
+    from app.schedule_proposal import build_weekly_schedule_proposal
+
+    proposal = build_weekly_schedule_proposal()
+    return {"status": "success", **proposal}
+
+
+@app.post("/api/schedule/approve")
+def approve_weekly_schedule(envelope: ScheduleApprovalEnvelope):
+    """Verify HITL approval envelope and write staged events to calendar."""
+    from app.schedule_approval import approve_schedule_proposal
+
+    result = approve_schedule_proposal(envelope.model_dump())
+    if result.get("status") != "success":
+        raise HTTPException(status_code=400, detail=result.get("message", "Approval failed."))
+    return result
+
+
+@app.post("/api/schedule/reject")
+def reject_weekly_schedule(envelope: ScheduleApprovalEnvelope):
+    """Reject a staged schedule proposal without writing to calendar."""
+    from app.schedule_approval import reject_schedule_proposal
+
+    result = reject_schedule_proposal(envelope.model_dump())
+    if result.get("status") != "success":
+        raise HTTPException(status_code=400, detail=result.get("message", "Rejection failed."))
+    return result
+
+def get_sunday_week_start(
+    reference_date: datetime.date | None = None, week_offset: int = 0
+) -> datetime.date:
+    """Return the Sunday that starts the week containing reference_date, shifted by week_offset."""
+    if reference_date is None:
+        reference_date = datetime.date.today()
+    days_since_sunday = (reference_date.weekday() + 1) % 7
+    return reference_date - datetime.timedelta(days=days_since_sunday) + datetime.timedelta(
+        weeks=week_offset
+    )
+
+
 @app.get("/api/calendar/events")
 def get_calendar_events(offset: int = 0):
     profile = state_store.get_user_profile()
     events = []
 
-    # Calculate date range for offset week
-    # Thursday July 2, 2026 is the base date
-    base_date = datetime.date(2026, 7, 2)
-    start_of_week = base_date + datetime.timedelta(days=offset * 7)
+    # Sunday-start week containing today, shifted by offset
+    start_of_week = get_sunday_week_start(week_offset=offset)
     end_of_week = start_of_week + datetime.timedelta(days=7)
 
     start_iso = datetime.datetime.combine(start_of_week, datetime.time.min).isoformat() + "Z"
@@ -314,8 +362,9 @@ def get_calendar_events(offset: int = 0):
                 try:
                     # Format: YYYY-MM-DDTHH:MM:SS-04:00
                     orig_start = datetime.datetime.fromisoformat(evt.get("start"))
-                    # Days diff from 2026-07-02
-                    days_diff = (orig_start.date() - datetime.date(2026, 7, 2)).days
+                    mock_anchor = datetime.date(2026, 7, 2)
+                    mock_week_sunday = get_sunday_week_start(mock_anchor)
+                    days_diff = (orig_start.date() - mock_week_sunday).days
                     new_start_date = start_of_week + datetime.timedelta(days=days_diff)
 
                     new_start = datetime.datetime.combine(new_start_date, orig_start.time()).isoformat() + "-04:00"
