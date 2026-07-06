@@ -1,241 +1,57 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppState } from '../stateManager';
 import { stageWeeklySchedule } from '../scheduleApi';
-
-// Safe Markdown-to-React Renderer for agent responses
-function MarkdownRenderer({ text }) {
-  if (!text) return null;
-
-  const lines = text.split('\n');
-  const elements = [];
-  let currentList = [];
-  let currentParagraph = [];
-  let currentCodeBlock = null;
-  let blockKey = 0;
-
-  const flushList = () => {
-    if (currentList.length > 0) {
-      elements.push(
-        <ul key={`list-${blockKey++}`} style={{ margin: '8px 0', paddingLeft: '20px', listStyleType: 'disc' }}>
-          {currentList.map((item, idx) => (
-            <li key={idx} style={{ marginBottom: '4px', fontSize: '13px', lineHeight: '1.4', color: 'var(--color-text-main)' }}>
-              {renderInline(item)}
-            </li>
-          ))}
-        </ul>
-      );
-      currentList = [];
-    }
-  };
-
-  const flushParagraph = () => {
-    if (currentParagraph.length > 0) {
-      elements.push(
-        <p key={`p-${blockKey++}`} style={{ margin: '8px 0', lineHeight: '1.4', fontSize: '13px', color: 'var(--color-text-main)' }}>
-          {currentParagraph.map((line, idx) => (
-            <React.Fragment key={idx}>
-              {renderInline(line)}
-              {idx < currentParagraph.length - 1 && <br />}
-            </React.Fragment>
-          ))}
-        </p>
-      );
-      currentParagraph = [];
-    }
-  };
-
-  const flushCodeBlock = () => {
-    if (currentCodeBlock !== null) {
-      elements.push(
-        <pre 
-          key={`code-${blockKey++}`} 
-          style={{ 
-            fontFamily: 'monospace',
-            backgroundColor: 'rgba(0, 0, 0, 0.25)',
-            border: '1px solid var(--border-card)',
-            borderRadius: '6px',
-            padding: '10px',
-            fontSize: '12px',
-            overflowX: 'auto',
-            margin: '8px 0',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-all',
-            color: 'var(--color-text-main)'
-          }}
-        >
-          {currentCodeBlock.join('\n')}
-        </pre>
-      );
-      currentCodeBlock = null;
-    }
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    
-    // Check for code blocks
-    if (line.trim().startsWith('```')) {
-      if (currentCodeBlock !== null) {
-        flushCodeBlock();
-      } else {
-        flushList();
-        flushParagraph();
-        currentCodeBlock = [];
-      }
-      continue;
-    }
-
-    if (currentCodeBlock !== null) {
-      currentCodeBlock.push(line);
-      continue;
-    }
-
-    const trimmed = line.trim();
-
-    if (trimmed === '') {
-      flushList();
-      flushParagraph();
-      continue;
-    }
-
-    // Headers
-    if (trimmed.startsWith('#')) {
-      flushList();
-      flushParagraph();
-      const match = trimmed.match(/^(#{1,6})\s+(.*)$/);
-      if (match) {
-        const level = match[1].length;
-        const headerText = match[2];
-        const HeadingTag = `h${level}`;
-        elements.push(
-          <HeadingTag key={`h-${blockKey++}`} style={headingStyles[level]}>
-            {renderInline(headerText)}
-          </HeadingTag>
-        );
-      } else {
-        currentParagraph.push(line);
-      }
-      continue;
-    }
-
-    // Unordered list items
-    const listMatch = line.match(/^\s*[-*]\s+(.*)$/);
-    if (listMatch) {
-      flushParagraph();
-      currentList.push(listMatch[1]);
-      continue;
-    }
-
-    // Ordered list items
-    const oListMatch = line.match(/^\s*(\d+)\.\s+(.*)$/);
-    if (oListMatch) {
-      flushList();
-      flushParagraph();
-      elements.push(
-        <div key={`ol-${blockKey++}`} style={{ display: 'flex', gap: '6px', fontSize: '13px', margin: '6px 0', paddingLeft: '12px', lineHeight: '1.4', color: 'var(--color-text-main)' }}>
-          <span style={{ fontWeight: '600' }}>{oListMatch[1]}.</span>
-          <span>{renderInline(oListMatch[2])}</span>
-        </div>
-      );
-      continue;
-    }
-
-    // Text line
-    flushList();
-    currentParagraph.push(line);
-  }
-
-  flushList();
-  flushParagraph();
-  flushCodeBlock();
-
-  return <div className="markdown-content">{elements}</div>;
-}
-
-// A helper to parse inline styles like bold, italic, and code blocks
-function renderInline(text) {
-  const regex = /(\*\*|__|\*|_|`)/g;
-  const parts = text.split(regex);
-  
-  if (parts.length === 1) return text;
-  
-  const result = [];
-  const stack = [];
-  
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    if (!part) continue;
-    
-    if (part === '**' || part === '__') {
-      if (stack.length > 0 && stack[stack.length - 1] === 'bold') {
-        stack.pop();
-      } else {
-        stack.push('bold');
-      }
-    } else if (part === '*' || part === '_') {
-      if (stack.length > 0 && stack[stack.length - 1] === 'italic') {
-        stack.pop();
-      } else {
-        stack.push('italic');
-      }
-    } else if (part === '`') {
-      if (stack.length > 0 && stack[stack.length - 1] === 'code') {
-        stack.pop();
-      } else {
-        stack.push('code');
-      }
-    } else {
-      let element = part;
-      for (let j = stack.length - 1; j >= 0; j--) {
-        const style = stack[j];
-        if (style === 'bold') {
-          element = <strong key={`b-${i}`}>{element}</strong>;
-        } else if (style === 'italic') {
-          element = <em key={`i-${i}`}>{element}</em>;
-        } else if (style === 'code') {
-          element = <code key={`c-${i}`} style={codeStyle}>{element}</code>;
-        }
-      }
-      result.push(element);
-    }
-  }
-  
-  return result;
-}
-
-const headingStyles = {
-  1: { fontSize: '20px', fontWeight: 'bold', margin: '14px 0 8px 0', color: 'var(--color-text-main)' },
-  2: { fontSize: '18px', fontWeight: 'bold', margin: '12px 0 6px 0', color: 'var(--color-text-main)' },
-  3: { fontSize: '16px', fontWeight: 'bold', margin: '10px 0 6px 0', color: 'var(--color-text-main)' },
-  4: { fontSize: '14px', fontWeight: 'bold', margin: '8px 0 4px 0', color: 'var(--color-text-main)' },
-  5: { fontSize: '13px', fontWeight: 'bold', margin: '6px 0 4px 0', color: 'var(--color-text-main)' },
-  6: { fontSize: '12px', fontWeight: 'bold', margin: '6px 0 4px 0', color: 'var(--color-text-main)' },
-};
-
-const codeStyle = {
-  fontFamily: 'monospace',
-  backgroundColor: 'rgba(255, 255, 255, 0.1)',
-  padding: '2px 4px',
-  borderRadius: '3px',
-  fontSize: '90%',
-  border: '1px solid var(--border-card)',
-  color: 'var(--color-text-main)',
-};
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 export default function GoalBuilderChat() {
   const [state, setState] = useAppState();
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [viewingArchiveId, setViewingArchiveId] = useState(null);
   const threadEndRef = useRef(null);
 
-  const handleNewConversation = () => {
-    if (window.confirm("Are you sure you want to start a new conversation? This will clear current chat messages.")) {
-      setState({
-        builderMessages: [
-          { role: 'model', text: "Hello! I am your Skill Concierge assistant. Let's discuss your career aspirations and design high-impact learning goals and weekly projects to get you there." }
-        ]
-      });
+  const archived = state.builderArchivedConversations || [];
+  const viewingArchive = archived.find((c) => c.id === viewingArchiveId);
+  const displayMessages = viewingArchive ? viewingArchive.messages : state.builderMessages;
+
+  const handleDeleteArchive = async (archiveId, event) => {
+    event.stopPropagation();
+    if (!window.confirm('Delete this archived conversation permanently?')) return;
+    try {
+      const res = await fetch(`/api/chat/builder/archive/${archiveId}`, { method: 'DELETE' });
+      if (res.ok) {
+        const data = await res.json();
+        setState({ builderArchivedConversations: data.builder_archived_conversations });
+        if (viewingArchiveId === archiveId) {
+          setViewingArchiveId(null);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to delete archived builder conversation:', err);
+    }
+  };
+
+  const handleNewConversation = async () => {
+    if (
+      state.builderMessages.length > 1 &&
+      !window.confirm('Archive this conversation and start a new one?')
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch('/api/chat/builder/archive', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setState({
+          builderMessages: data.builder_messages,
+          builderArchivedConversations: data.builder_archived_conversations,
+        });
+        setViewingArchiveId(null);
+        setShowArchived(false);
+      }
+    } catch (err) {
+      console.error('Failed to archive builder conversation:', err);
     }
   };
 
@@ -248,7 +64,19 @@ export default function GoalBuilderChat() {
 
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [state.builderMessages, isTyping]);
+  }, [displayMessages, isTyping, viewingArchiveId]);
+
+  const persistBuilderMessages = async (messages) => {
+    try {
+      await fetch('/api/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ builder_messages: messages }),
+      });
+    } catch (err) {
+      console.error('Failed to persist builder messages:', err);
+    }
+  };
 
   const handleSend = async (textToSend) => {
     if (!textToSend.trim()) return;
@@ -272,16 +100,16 @@ export default function GoalBuilderChat() {
 
       if (response.ok) {
         const data = await response.json();
-        setState({
-          builderMessages: [
-            ...updatedMsgs,
-            { 
-              role: 'model', 
-              text: data.text,
-              suggestedGoal: data.suggestedGoal || null
-            }
-          ]
-        });
+        const nextMessages = [
+          ...updatedMsgs,
+          { 
+            role: 'model', 
+            text: data.text,
+            suggestedGoal: data.suggestedGoal || null
+          }
+        ];
+        setState({ builderMessages: nextMessages });
+        await persistBuilderMessages(nextMessages);
       } else {
         throw new Error("Failed to send message to live agent");
       }
@@ -327,23 +155,85 @@ export default function GoalBuilderChat() {
           <h2 style={styles.pageTitle}>Conversational Goal Builder 💬</h2>
           <p style={styles.pageSubtitle}>Converse with the agent concierge to explore market insights and refine learning directions.</p>
         </div>
-        <button
-          onClick={handleNewConversation}
-          onMouseEnter={() => setIsHovered(true)}
-          onMouseLeave={() => setIsHovered(false)}
-          style={{
-            ...styles.newConvBtn,
-            backgroundColor: isHovered ? 'rgba(99, 102, 241, 0.15)' : 'transparent',
-          }}
-        >
-          🔄 New Conversation
-        </button>
+        <div style={styles.headerActions}>
+          <button
+            type="button"
+            onClick={() => {
+              setShowArchived((v) => !v);
+              setViewingArchiveId(null);
+            }}
+            style={styles.secondaryBtn}
+          >
+            📁 Past Conversations{archived.length ? ` (${archived.length})` : ''}
+          </button>
+          <button type="button" onClick={handleNewConversation} style={styles.newConvBtn}>
+            🔄 New Conversation
+          </button>
+        </div>
       </div>
 
+      {showArchived && (
+        <div style={styles.archivePanel} className="glass-card">
+          <div style={styles.archiveHeader}>
+            <strong>Archived conversations</strong>
+            <button type="button" onClick={() => setShowArchived(false)} style={styles.closeArchiveBtn}>
+              Close
+            </button>
+          </div>
+          {archived.length === 0 ? (
+            <p style={styles.archiveEmpty}>No archived conversations yet.</p>
+          ) : (
+            <div style={styles.archiveList}>
+              {archived.map((conv) => (
+                <div
+                  key={conv.id}
+                  style={{
+                    ...styles.archiveItem,
+                    borderColor:
+                      viewingArchiveId === conv.id ? 'var(--color-accent)' : 'var(--border-card)',
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setViewingArchiveId(conv.id)}
+                    style={styles.archiveItemMain}
+                  >
+                    <span style={styles.archiveTitle}>{conv.title}</span>
+                    <span style={styles.archiveDate}>
+                      {conv.archived_at ? new Date(conv.archived_at).toLocaleString() : ''}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => handleDeleteArchive(conv.id, e)}
+                    style={styles.deleteArchiveBtn}
+                    title="Delete archived conversation"
+                  >
+                    🗑️
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {viewingArchive && (
+            <button
+              type="button"
+              onClick={() => setViewingArchiveId(null)}
+              style={{ ...styles.secondaryBtn, marginTop: '12px' }}
+            >
+              ← Back to current conversation
+            </button>
+          )}
+        </div>
+      )}
+
       <div style={styles.chatContainer} className="glass-card">
+        {viewingArchive && (
+          <div style={styles.viewingBanner}>Viewing archived conversation — read only</div>
+        )}
         {/* Messages Log Thread */}
         <div style={styles.messagesThread}>
-          {state.builderMessages.map((msg, idx) => (
+          {displayMessages.map((msg, idx) => (
             <div 
               key={idx} 
               style={{
@@ -378,6 +268,15 @@ export default function GoalBuilderChat() {
                     </div>
                     <h4 style={styles.proposalTitle}>{msg.suggestedGoal.title}</h4>
                     <p style={styles.proposalDesc}>{msg.suggestedGoal.description}</p>
+                    {msg.suggestedGoal.priority !== undefined && (
+                      <span style={styles.proposalPriority}>
+                        Priority: {{
+                          0: 'Low urgency',
+                          1: 'Medium urgency',
+                          2: 'High urgency',
+                        }[msg.suggestedGoal.priority] ?? 'Medium urgency'}
+                      </span>
+                    )}
                     
                     <div style={styles.proposalSubProjects}>
                       <strong>Milestones & Tasks Learning Map:</strong>
@@ -443,35 +342,43 @@ export default function GoalBuilderChat() {
           <div ref={threadEndRef} />
         </div>
 
-        {/* Suggestion Chips */}
-        <div style={styles.chipsRow}>
-          {suggestionChips.map((chip, idx) => (
-            <button 
-              key={idx} 
-              onClick={() => handleSend(chip)}
-              style={styles.chipBtn}
-            >
-              💡 {chip}
-            </button>
-          ))}
-        </div>
+        {!viewingArchive && (
+          <>
+            <div style={styles.chipsRow}>
+              {suggestionChips.map((chip, idx) => (
+                <button 
+                  key={idx} 
+                  onClick={() => handleSend(chip)}
+                  style={styles.chipBtn}
+                >
+                  💡 {chip}
+                </button>
+              ))}
+            </div>
 
-        {/* Input Bar */}
-        <form 
-          onSubmit={(e) => { e.preventDefault(); handleSend(inputValue); }}
-          style={styles.inputBar}
-        >
-          <input
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder="Type your career goal or upskilling interest (e.g. Master LangChain...)"
-            style={styles.chatInput}
-          />
-          <button type="submit" style={styles.sendBtn} disabled={!inputValue.trim()}>
-            Send
-          </button>
-        </form>
+            <form 
+              onSubmit={(e) => { e.preventDefault(); handleSend(inputValue); }}
+              style={styles.inputBar}
+            >
+              <textarea
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                placeholder="Type your career goal or upskilling interest (e.g. Master LangChain...)"
+                style={styles.chatInput}
+                rows={4}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend(inputValue);
+                  }
+                }}
+              />
+              <button type="submit" style={styles.sendBtn} disabled={!inputValue.trim()}>
+                Send
+              </button>
+            </form>
+          </>
+        )}
       </div>
     </div>
   );
@@ -486,10 +393,15 @@ const styles = {
   headerContainer: {
     display: 'flex',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     marginBottom: '20px',
     width: '100%',
     gap: '16px',
+    flexWrap: 'wrap',
+  },
+  headerActions: {
+    display: 'flex',
+    gap: '8px',
     flexWrap: 'wrap',
   },
   header: {
@@ -510,6 +422,92 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
+  },
+  secondaryBtn: {
+    backgroundColor: 'var(--bg-sidebar)',
+    border: '1px solid var(--input-border)',
+    color: 'var(--color-text-main)',
+    borderRadius: '8px',
+    padding: '8px 16px',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
+  archivePanel: {
+    padding: '16px',
+    marginBottom: '16px',
+  },
+  archiveHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '12px',
+    fontSize: '13px',
+    color: 'var(--color-text-main)',
+  },
+  closeArchiveBtn: {
+    background: 'none',
+    border: 'none',
+    color: 'var(--color-text-muted)',
+    cursor: 'pointer',
+    fontSize: '12px',
+  },
+  archiveEmpty: {
+    fontSize: '12px',
+    color: 'var(--color-text-muted)',
+    margin: 0,
+  },
+  archiveList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  archiveItem: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '4px',
+    borderRadius: '8px',
+    border: '1px solid var(--border-card)',
+    backgroundColor: 'var(--bg-sidebar)',
+  },
+  archiveItemMain: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '12px',
+    flex: 1,
+    padding: '6px 8px',
+    border: 'none',
+    background: 'transparent',
+    cursor: 'pointer',
+    textAlign: 'left',
+  },
+  deleteArchiveBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '14px',
+    padding: '6px 8px',
+    borderRadius: '6px',
+    opacity: 0.7,
+  },
+  archiveTitle: {
+    fontSize: '13px',
+    color: 'var(--color-text-main)',
+    fontWeight: '500',
+  },
+  archiveDate: {
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
+    whiteSpace: 'nowrap',
+  },
+  viewingBanner: {
+    fontSize: '11px',
+    color: 'var(--color-warning)',
+    marginBottom: '8px',
+    fontWeight: '600',
   },
   pageTitle: {
     fontSize: '22px',
@@ -588,6 +586,15 @@ const styles = {
     color: 'var(--color-text-muted)',
     margin: 0,
   },
+  proposalPriority: {
+    fontSize: '11px',
+    fontWeight: '600',
+    color: 'var(--color-accent)',
+    backgroundColor: 'rgba(99, 102, 241, 0.12)',
+    padding: '3px 8px',
+    borderRadius: '4px',
+    alignSelf: 'flex-start',
+  },
   proposalSubProjects: {
     fontSize: '11px',
     display: 'flex',
@@ -650,6 +657,7 @@ const styles = {
   inputBar: {
     display: 'flex',
     gap: '12px',
+    alignItems: 'flex-end',
   },
   chatInput: {
     flex: 1,
@@ -660,16 +668,23 @@ const styles = {
     padding: '12px 16px',
     fontSize: '13px',
     outline: 'none',
+    resize: 'vertical',
+    minHeight: '96px',
+    maxHeight: '200px',
+    overflowY: 'auto',
+    lineHeight: '1.4',
+    fontFamily: 'inherit',
   },
   sendBtn: {
     backgroundColor: 'var(--color-accent)',
     color: '#ffffff',
     border: 'none',
     borderRadius: '8px',
-    padding: '0 20px',
+    padding: '12px 20px',
     fontSize: '13px',
     fontWeight: '600',
     cursor: 'pointer',
+    alignSelf: 'flex-end',
   },
   typingDot: {
     display: 'inline-block',

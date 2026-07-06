@@ -26,6 +26,11 @@ class BaseStateStore(ABC):
         pass
 
     @abstractmethod
+    def set_work_log(self, entries: list[dict[str, Any]]) -> None:
+        """Replace the full work log."""
+        pass
+
+    @abstractmethod
     def get_goals(self) -> list[dict[str, Any]]:
         """Retrieve all goals for the user."""
         pass
@@ -80,108 +85,110 @@ def adjust_past_due_dates(sub_projects: list[dict[str, Any]]) -> list[dict[str, 
 
 
 def pace_and_schedule_goals(profile: dict[str, Any], busy_slots: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Paces out due dates for all uncompleted milestones and nested tasks of active goals
-    based on study_days, hours_per_week, and task estimated times.
+    """Paces due dates for active goals, prioritizing higher-urgency projects first.
+
+  Higher-priority projects receive earlier due dates; lower-priority projects are
+  pushed back when capacity is contested. Sets per-goal scheduling_warning when the
+  weekly hour budget cannot accommodate remaining work.
     """
     import datetime
+    from app.scheduling_utils import (
+        get_goal_priority,
+        normalize_priority,
+        task_remaining_hours,
+        total_remaining_hours,
+    )
+
     today = datetime.date.today()
     base_date = max(today, datetime.date(2026, 7, 2))
-    
+
     study_days = profile.get("study_days", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
     if not study_days:
         study_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-    
+
     hours_per_week = profile.get("hours_per_week", 5)
     daily_budget = hours_per_week / len(study_days) if len(study_days) > 0 else 1.0
-    
-    # We will gather all active goals (to-do, in-progress) and pace their uncompleted tasks sequentially
+
     goals = profile.get("goals", [])
-    
-    # Trace through future days sequentially starting from base_date
+    for g in goals:
+        g["priority"] = normalize_priority(g.get("priority", 1))
+        g.pop("scheduling_warning", None)
+
+    active_goals = sorted(
+        [g for g in goals if g.get("status") in ("to-do", "in-progress")],
+        key=lambda g: (-get_goal_priority(g), goals.index(g)),
+    )
+
     current_date = base_date
     allocated_hours_today = 0.0
-    
-    def is_study_day(date_obj):
+
+    def is_study_day(date_obj: datetime.date) -> bool:
         return date_obj.strftime("%A") in study_days
-        
-    for g in goals:
-        if g.get("status") in ["to-do", "in-progress"]:
-            sub_projects = g.get("sub_projects", [])
-            for m in sub_projects:
-                # 1. Pace tasks within this milestone
-                tasks = m.get("tasks", [])
-                if tasks:
-                    for t in tasks:
-                        if t.get("completed"):
-                            continue
-                        
-                        # Parse estimated time
-                        est_str = t.get("estimated_time", "2 hours")
-                        try:
-                            # e.g. "2 hours" -> 2.0
-                            est_hours = float(est_str.split()[0])
-                        except Exception:
-                            est_hours = 2.0
-                            
-                        # Subtract tracked allocated time (convert mins to hours)
-                        allocated_hours = t.get("allocated_time_mins", 0) / 60.0
-                        remaining_hours = max(0.0, est_hours - allocated_hours)
-                        
-                        # Allocate remaining_hours to future study days
-                        hours_needed = remaining_hours
-                        if hours_needed > 0:
-                            while hours_needed > 0:
-                                if not is_study_day(current_date):
-                                    current_date += datetime.timedelta(days=1)
-                                    allocated_hours_today = 0.0
-                                    continue
-                                
-                                available_today = max(0.0, daily_budget - allocated_hours_today)
-                                if available_today >= hours_needed:
-                                    allocated_hours_today += hours_needed
-                                    hours_needed = 0.0
-                                else:
-                                    hours_needed -= available_today
-                                    current_date += datetime.timedelta(days=1)
-                                    allocated_hours_today = 0.0
-                                    
-                            t["dueDate"] = current_date.isoformat()
-                    
-                    # Update milestone due date to max of its tasks' due dates
-                    task_dates = []
-                    for t in tasks:
-                        if t.get("dueDate"):
-                            try:
-                                task_dates.append(datetime.date.fromisoformat(t["dueDate"]))
-                            except Exception:
-                                pass
-                    if task_dates:
-                        m["dueDate"] = max(task_dates).isoformat()
-                    else:
-                        m["dueDate"] = current_date.isoformat()
-                else:
-                    # Flat milestone format (no tasks)
-                    if m.get("completed"):
+
+    def allocate_hours(hours_needed: float) -> datetime.date:
+        nonlocal current_date, allocated_hours_today
+        if hours_needed <= 0:
+            return current_date
+        while hours_needed > 0:
+            if not is_study_day(current_date):
+                current_date += datetime.timedelta(days=1)
+                allocated_hours_today = 0.0
+                continue
+
+            available_today = max(0.0, daily_budget - allocated_hours_today)
+            if available_today >= hours_needed:
+                allocated_hours_today += hours_needed
+                hours_needed = 0.0
+            else:
+                hours_needed -= available_today
+                current_date += datetime.timedelta(days=1)
+                allocated_hours_today = 0.0
+        return current_date
+
+    for g in active_goals:
+        for m in g.get("sub_projects", []):
+            tasks = m.get("tasks", [])
+            if tasks:
+                task_dates: list[datetime.date] = []
+                for t in tasks:
+                    if t.get("completed"):
                         continue
-                    
-                    # Assume flat milestone takes 3 hours of budget
-                    hours_needed = 3.0
-                    while hours_needed > 0:
-                        if not is_study_day(current_date):
-                            current_date += datetime.timedelta(days=1)
-                            allocated_hours_today = 0.0
-                            continue
-                        
-                        available_today = max(0.0, daily_budget - allocated_hours_today)
-                        if available_today >= hours_needed:
-                            allocated_hours_today += hours_needed
-                            hours_needed = 0.0
-                        else:
-                            hours_needed -= available_today
-                            current_date += datetime.timedelta(days=1)
-                            allocated_hours_today = 0.0
-                    
+                    remaining_hours = task_remaining_hours(t)
+                    if remaining_hours > 0:
+                        due = allocate_hours(remaining_hours)
+                        t["dueDate"] = due.isoformat()
+                        task_dates.append(due)
+                    elif t.get("dueDate"):
+                        try:
+                            task_dates.append(datetime.date.fromisoformat(t["dueDate"]))
+                        except ValueError:
+                            pass
+
+                if task_dates:
+                    m["dueDate"] = max(task_dates).isoformat()
+                elif not m.get("completed"):
                     m["dueDate"] = current_date.isoformat()
+            elif not m.get("completed"):
+                due = allocate_hours(3.0)
+                m["dueDate"] = due.isoformat()
+
+    remaining_hours = total_remaining_hours(goals)
+    weeks_needed = remaining_hours / hours_per_week if hours_per_week > 0 else float("inf")
+    horizon_weeks = 8
+
+    if remaining_hours > 0 and weeks_needed > horizon_weeks:
+        warning = (
+            f"Your projects need about {remaining_hours:.1f} hours of work "
+            f"({weeks_needed:.1f} weeks at {hours_per_week} hrs/week), which exceeds "
+            f"the {horizon_weeks}-week planning horizon. Please adjust due dates or "
+            f"increase your weekly study hours."
+        )
+        profile["schedule_capacity_warning"] = warning
+        for g in active_goals:
+            g["scheduling_warning"] = warning
+    else:
+        profile.pop("schedule_capacity_warning", None)
+
     return profile
 
 
@@ -293,6 +300,10 @@ class LocalJsonStateStore(BaseStateStore):
         current.append(entry)
         self._write_json(self.work_log_path, current)
 
+    def set_work_log(self, entries: list[dict[str, Any]]) -> None:
+        """Replace the full work log (used when pruning scheduled events)."""
+        self._write_json(self.work_log_path, entries)
+
     def get_goals(self) -> list[dict[str, Any]]:
         profile = self.get_user_profile()
         return profile.get("goals", [])
@@ -300,6 +311,9 @@ class LocalJsonStateStore(BaseStateStore):
     def update_goal(self, goal_id: str, goal_data: dict[str, Any]) -> None:
         if "sub_projects" in goal_data:
             goal_data["sub_projects"] = adjust_past_due_dates(goal_data["sub_projects"])
+        if "priority" in goal_data:
+            from app.scheduling_utils import normalize_priority
+            goal_data["priority"] = normalize_priority(goal_data["priority"])
         profile = self.get_user_profile()
         goals = profile.get("goals", [])
         updated_goals = []
@@ -316,11 +330,15 @@ class LocalJsonStateStore(BaseStateStore):
             updated_goals.append(goal_data)
         profile["goals"] = updated_goals
         update_tasks_allocated_time(profile)
+        if "priority" in goal_data:
+            profile = pace_and_schedule_goals(profile)
         self._write_json(self.profile_path, profile)
 
     def create_goal(self, goal_data: dict[str, Any]) -> None:
         if "sub_projects" in goal_data:
             goal_data["sub_projects"] = adjust_past_due_dates(goal_data["sub_projects"])
+        from app.scheduling_utils import normalize_priority
+        goal_data["priority"] = normalize_priority(goal_data.get("priority", 1))
         profile = self.get_user_profile()
         goals = profile.get("goals", [])
         # Ensure ID is set

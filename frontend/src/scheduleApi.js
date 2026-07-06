@@ -68,3 +68,25 @@ export async function rejectWeeklySchedule(envelope) {
 
   return res.json();
 }
+
+/** Delete managed learning blocks on a specific day (YYYY-MM-DD). */
+export async function clearDayLearningEvents(date) {
+  const res = await fetch('/api/calendar/clear-day', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date }),
+  });
+
+  if (!res.ok) {
+    let message = 'Failed to clear day';
+    try {
+      const err = await res.json();
+      message = err.detail || err.message || message;
+    } catch (_) {
+      // ignore parse errors
+    }
+    throw new Error(message);
+  }
+
+  return res.json();
+}

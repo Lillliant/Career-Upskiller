@@ -33,7 +33,15 @@ except Exception:
 from app.app_utils.telemetry import setup_telemetry
 from app.app_utils.typing import Feedback
 from app.mcp_clients import get_calendar_free_busy
-from app.skills.reflection_loop import process_user_reflection
+from app.skills.reflection_loop import (
+    archive_builder_conversation,
+    archive_reflection_conversation,
+    delete_builder_archived_conversation,
+    delete_reflection_archived_conversation,
+    get_reflection_greeting,
+    new_reflection_conversation,
+    process_user_reflection,
+)
 from app.state_store import state_store
 
 
@@ -47,11 +55,14 @@ class ProfileUpdate(BaseModel):
     target_calendars: list[dict[str, Any]] | None = None
     available_google_calendars: list[dict[str, Any]] | None = None
     onboarded: bool | None = None
+    builder_messages: list[dict[str, Any]] | None = None
+    builder_archived_conversations: list[dict[str, Any]] | None = None
 
 class GoalCreate(BaseModel):
     title: str
     description: str | None = ""
     status: str | None = "to-do"
+    priority: int | None = 1
     sub_projects: list[dict[str, Any]] | None = None
     skills: list[dict[str, Any]] | None = None
 
@@ -59,15 +70,19 @@ class GoalUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     status: str | None = None
+    priority: int | None = None
     sub_projects: list[dict[str, Any]] | None = None
     skills: list[dict[str, Any]] | None = None
     time_spent_mins: int | None = None
     conversations: list[dict[str, Any]] | None = None
+    reflection_messages: list[dict[str, Any]] | None = None
+    archived_reflection_conversations: list[dict[str, Any]] | None = None
 
 class ReflectionSubmit(BaseModel):
     learning_block_id: str | None = "generic"
     reflection_text: str
     success_rating: int | None = None
+    confirm_deletion: bool = False
 
 class ScheduleApprovalEnvelope(BaseModel):
     transaction_id: str
@@ -192,7 +207,10 @@ def create_goal(goal: GoalCreate):
     if not goal_dict.get("skills"):
         goal_dict["skills"] = []
     goal_dict["time_spent_mins"] = 0
-    goal_dict["conversations"] = []
+    greeting = {"role": "model", "text": get_reflection_greeting()}
+    goal_dict["reflection_messages"] = [greeting]
+    goal_dict["conversations"] = [greeting]
+    goal_dict["archived_reflection_conversations"] = []
     state_store.create_goal(goal_dict)
     return {"status": "success", "goals": state_store.get_goals()}
 
@@ -352,11 +370,9 @@ def get_calendar_events(offset: int = 0):
             matched_block = matched_events.get(idx)
 
             evt_summary = evt.get("summary", "Busy")
-            is_learning_type = (
-                matched_block is not None or 
-                evt_summary.startswith("Learning:") or 
-                evt_summary.startswith("Micro-learning:")
-            )
+            # Only treat as a managed learning block when matched to session state.
+            # Orphan Google events (e.g. after reset) keep Learning: titles but are read-only.
+            is_learning_type = matched_block is not None
 
             if is_mock_fallback:
                 try:
@@ -466,6 +482,10 @@ class CalendarEventUpdate(BaseModel):
     summary: str | None = None
     description: str | None = None
 
+
+class ClearDayRequest(BaseModel):
+    date: str  # YYYY-MM-DD
+
 @app.put("/api/calendar/events/{event_id}")
 def update_calendar_event_endpoint(event_id: str, payload: CalendarEventUpdate):
     profile = state_store.get_user_profile()
@@ -545,6 +565,18 @@ def delete_calendar_event_endpoint(event_id: str):
     profile["scheduled_events"] = [evt for evt in scheduled_events if evt.get("id") != event_to_delete.get("id")]
     state_store.update_user_profile(profile)
     return {"status": "success", "google_status": google_status}
+
+
+@app.post("/api/calendar/clear-day")
+def clear_day_learning_events(payload: ClearDayRequest):
+    """Remove managed learning blocks on a day (Google Calendar + local state)."""
+    from app.scheduling_utils import clear_learning_events_for_day
+
+    result = clear_learning_events_for_day(payload.date)
+    if result.get("status") != "success":
+        raise HTTPException(status_code=400, detail=result.get("message", "Clear failed."))
+    return result
+
 
 @app.get("/api/auth/google/login")
 def google_login_url():
@@ -663,47 +695,96 @@ def reflect_on_goal(goal_id: str, reflection: ReflectionSubmit):
         learning_block_id=reflection.learning_block_id,
         reflection_text=reflection.reflection_text,
         success_rating=reflection.success_rating,
-        goal_id=goal_id
+        goal_id=goal_id,
+        confirm_deletion=reflection.confirm_deletion,
     )
 
-    # Re-read the updated profile from process_user_reflection to keep milestone changes
     profile = state_store.get_user_profile()
+    goal = next((g for g in profile.get("goals", []) if g.get("id") == goal_id), None)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found.")
 
-    # Associate reflection directly with goal
-    goals = profile.get("goals", [])
-    updated_goals = []
-    for g in goals:
-        if g.get("id") == goal_id:
-            convs = g.get("conversations", [])
-            timestamp = result.get("logged_entry", {}).get("timestamp", "2026-07-02T11:38:00Z")
+    convs = list(goal.get("reflection_messages") or goal.get("conversations") or [])
+    if not convs:
+        convs = [{"role": "model", "text": get_reflection_greeting()}]
+    timestamp = result.get("logged_entry", {}).get("timestamp", "2026-07-02T11:38:00Z")
 
-            convs.append({
-                "role": "user",
-                "text": reflection.reflection_text,
-                "timestamp": timestamp
-            })
+    convs.append({
+        "role": "user",
+        "text": reflection.reflection_text,
+        "timestamp": timestamp,
+    })
 
-            adj_reason = result["updated_profile"].get("adjustment_reason", "Goal adjusted.")
-            feedback = f"Thank you for sharing your reflection. {adj_reason}"
-            convs.append({
-                "role": "model",
-                "text": feedback,
-                "timestamp": timestamp
-            })
+    feedback = result.get("feedback") or result["updated_profile"].get("adjustment_reason", "Goal adjusted.")
+    model_msg = {
+        "role": "model",
+        "text": feedback,
+        "timestamp": timestamp,
+    }
+    if result.get("pending_deletion"):
+        model_msg["pending_deletion"] = result["pending_deletion"]
+        model_msg["requires_confirmation"] = True
+    convs.append(model_msg)
 
-            g["conversations"] = convs
-            g["time_spent_mins"] = g.get("time_spent_mins", 0) + 30 # assume 30 minutes added per reflection
-
-        updated_goals.append(g)
-
-    profile["goals"] = updated_goals
-    state_store.update_user_profile(profile)
+    state_store.update_goal(goal_id, {
+        "reflection_messages": convs,
+        "conversations": convs,
+        "time_spent_mins": goal.get("time_spent_mins", 0) + 30,
+    })
 
     return {
         "status": "success",
         "result": result,
-        "goals": state_store.get_goals()
+        "feedback": result.get("feedback"),
+        "pending_deletion": result.get("pending_deletion"),
+        "goals": state_store.get_goals(),
     }
+
+
+@app.post("/api/goals/{goal_id}/reflection/archive")
+def archive_goal_reflection(goal_id: str):
+    profile = state_store.get_user_profile()
+    if not profile:
+        raise HTTPException(status_code=400, detail="Profile not onboarded.")
+    return archive_reflection_conversation(goal_id)
+
+
+@app.post("/api/goals/{goal_id}/reflection/new")
+def start_new_goal_reflection(goal_id: str):
+    profile = state_store.get_user_profile()
+    if not profile:
+        raise HTTPException(status_code=400, detail="Profile not onboarded.")
+    return new_reflection_conversation(goal_id)
+
+
+@app.delete("/api/goals/{goal_id}/reflection/archive/{archive_id}")
+def delete_goal_reflection_archive(goal_id: str, archive_id: str):
+    profile = state_store.get_user_profile()
+    if not profile:
+        raise HTTPException(status_code=400, detail="Profile not onboarded.")
+    result = delete_reflection_archived_conversation(goal_id, archive_id)
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="Archived conversation not found.")
+    return result
+
+
+@app.post("/api/chat/builder/archive")
+def archive_goal_builder_conversation():
+    profile = state_store.get_user_profile()
+    if not profile:
+        raise HTTPException(status_code=400, detail="Profile not onboarded.")
+    return archive_builder_conversation()
+
+
+@app.delete("/api/chat/builder/archive/{archive_id}")
+def delete_goal_builder_archive(archive_id: str):
+    profile = state_store.get_user_profile()
+    if not profile:
+        raise HTTPException(status_code=400, detail="Profile not onboarded.")
+    result = delete_builder_archived_conversation(archive_id)
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail="Archived conversation not found.")
+    return result
 
 @app.post("/feedback")
 def collect_feedback(feedback: Feedback) -> dict[str, str]:
@@ -728,6 +809,8 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat/goals")
 def chat_goals(request: ChatRequest):
+    from app.scheduling_utils import infer_priority_from_messages, normalize_priority
+
     user_msgs = [m for m in request.messages if m.role == 'user']
     if not user_msgs:
         return {"text": "Hello! I am your Skill Concierge assistant. Let's discuss your career aspirations and design high-impact learning goals and weekly projects to get you there.", "suggestedGoal": None}
@@ -735,6 +818,23 @@ def chat_goals(request: ChatRequest):
     first_query = user_msgs[0].text
     last_query = user_msgs[-1].text
     today_str = datetime.date.today().isoformat()
+    message_dicts = [{"role": m.role, "text": m.text} for m in request.messages]
+
+    def apply_priority_and_pacing(suggested_goal: dict[str, Any]) -> dict[str, Any]:
+        from app.state_store import adjust_past_due_dates, pace_and_schedule_goals, state_store
+
+        if "priority" not in suggested_goal or suggested_goal.get("priority") is None:
+            suggested_goal["priority"] = infer_priority_from_messages(message_dicts)
+        suggested_goal["priority"] = normalize_priority(suggested_goal.get("priority", 1))
+
+        if suggested_goal and "sub_projects" in suggested_goal:
+            suggested_goal["sub_projects"] = adjust_past_due_dates(suggested_goal["sub_projects"])
+            profile = state_store.get_user_profile()
+            existing_goals = list(profile.get("goals", []))
+            profile["goals"] = existing_goals + [suggested_goal]
+            profile = pace_and_schedule_goals(profile)
+            suggested_goal = profile["goals"][-1]
+        return suggested_goal
 
     # 1. Attempt to call Gemini Client (Vertex / Gen AI fallback)
     try:
@@ -754,10 +854,12 @@ def chat_goals(request: ChatRequest):
             Today's current date is {today_str}. Please space out the tasks and milestones starting from this date.
 
             Rules:
-            1. If this is the FIRST message from the user (i.e. the history contains only 1 user query), you MUST ask 2-3 follow-up questions to understand their current familiarity level (beginner, intermediate, advanced) and their preference for conceptual study vs hands-on building. Do NOT recommend a structured goal block yet.
-            2. If the history has 2 or more user messages, summarize their goal, and output a friendly concluding message. At the end of your response, you MUST output a structured JSON upskilling goal object inside markdown code fences (` ```json `), with the following fields:
+            1. If this is the FIRST message from the user (i.e. the history contains only 1 user query), you MUST ask 2-3 follow-up questions to understand their current familiarity level (beginner, intermediate, advanced), their preference for conceptual study vs hands-on building, AND how urgent or important this project is relative to their other goals. Use plain language (e.g. "Is this a top priority right now, or more of a background skill?"). Do NOT recommend a structured goal block yet.
+            2. If the history has 2 user messages but urgency/priority has NOT been discussed yet, ask ONE direct follow-up about priority/urgency before generating the goal. Do NOT output the JSON goal yet.
+            3. If the history has 2 or more user messages and priority has been addressed (or the user clearly stated urgency/importance), summarize their goal, and output a friendly concluding message. At the end of your response, you MUST output a structured JSON upskilling goal object inside markdown code fences (` ```json `), with the following fields:
                - title: Str (the title of the customized goal/project)
                - description: Str (brief project overview)
+               - priority: Int (0 = low urgency, 1 = medium urgency, 2 = high urgency — infer from the user's answers about importance/urgency; use 1 if unclear)
                - sub_projects: List of Dicts (Milestones), where each dict has:
                  - title: Str (e.g. "Milestone 1: JavaScript Foundations")
                  - description: Str (Milestone description, e.g. "Understand how to write basic instructions and control the flow of a program.")
@@ -797,12 +899,7 @@ def chat_goals(request: ChatRequest):
                     json_str = parts[1].split("```")[0].strip()
                     suggested_goal = json.loads(json_str)
                     if suggested_goal and "sub_projects" in suggested_goal:
-                        from app.state_store import adjust_past_due_dates, pace_and_schedule_goals, state_store
-                        suggested_goal["sub_projects"] = adjust_past_due_dates(suggested_goal["sub_projects"])
-                        profile = state_store.get_user_profile()
-                        profile["goals"] = [suggested_goal]
-                        profile = pace_and_schedule_goals(profile)
-                        suggested_goal = profile["goals"][0]
+                        suggested_goal = apply_priority_and_pacing(suggested_goal)
                     response_text = parts[0].strip() + "\n\n" + (parts[1].split("```")[1] if len(parts[1].split("```")) > 1 else "").strip()
                 except Exception:
                     pass
@@ -819,9 +916,20 @@ def chat_goals(request: ChatRequest):
         reply = (
             f"That sounds like an exciting direction! To make sure I customize this goal perfectly to your lifestyle:\n"
             f"1. What is your current level of familiarity with \"{last_query}\" (e.g. absolute beginner, some experience, advanced)?\n"
-            f"2. Do you prefer hands-on building projects or conceptual study blocks?"
+            f"2. Do you prefer hands-on building projects or conceptual study blocks?\n"
+            f"3. How urgent or important is this project for you right now (e.g. top priority, steady background learning, or low urgency)?"
         )
         return {"text": reply, "suggestedGoal": None}
+    elif len(user_msgs) == 2 and infer_priority_from_messages(message_dicts) == 1:
+        combined = " ".join(m.text.lower() for m in user_msgs)
+        if not any(kw in combined for kw in ("urgent", "important", "priority", "rush", "asap", "background", "low")):
+            reply = (
+                "Great context! One more thing before I build your learning plan:\n"
+                "How urgent or important is this project compared to your other goals? "
+                "(e.g. **high urgency** — I need this soon, **medium** — steady progress is fine, "
+                "or **low** — I can work on it when I have spare time.)"
+            )
+            return {"text": reply, "suggestedGoal": None}
     else:
         lower_first = first_query.lower()
         if "ai" in lower_first or "agentic" in lower_first:
@@ -1005,12 +1113,7 @@ def chat_goals(request: ChatRequest):
             }
 
         if suggestion and "sub_projects" in suggestion:
-            from app.state_store import adjust_past_due_dates, pace_and_schedule_goals, state_store
-            suggestion["sub_projects"] = adjust_past_due_dates(suggestion["sub_projects"])
-            profile = state_store.get_user_profile()
-            profile["goals"] = [suggestion]
-            profile = pace_and_schedule_goals(profile)
-            suggestion = profile["goals"][0]
+            suggestion = apply_priority_and_pacing(suggestion)
 
         return {
             "text": reply,

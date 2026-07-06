@@ -2,16 +2,91 @@ import React, { useState, useEffect } from 'react';
 import { useAppState } from '../stateManager';
 import { stageWeeklySchedule } from '../scheduleApi';
 
+const PRIORITY_LABELS = {
+  0: 'Low urgency',
+  1: 'Medium urgency',
+  2: 'High urgency',
+};
+
+function normalizePriority(value) {
+  const p = Number(value);
+  if (Number.isNaN(p)) return 1;
+  return Math.max(0, Math.min(2, p));
+}
+
+function priorityLabel(value) {
+  return PRIORITY_LABELS[normalizePriority(value)] || PRIORITY_LABELS[1];
+}
+
+function parseDurationMins(estStr) {
+  if (!estStr) return 60;
+  const s = String(estStr).toLowerCase().trim();
+  try {
+    const parts = s.split(/\s+/);
+    if (!parts.length) return 60;
+    const val = parseFloat(parts[0]);
+    if (Number.isNaN(val)) return 60;
+    if (s.includes('hour')) return Math.round(val * 60);
+    if (s.includes('min')) return Math.round(val);
+    return 60;
+  } catch {
+    return 60;
+  }
+}
+
+function computeGoalHoursStats(goal) {
+  let totalMins = 0;
+  let scheduledIncompleteMins = 0;
+
+  (goal.sub_projects || []).forEach((m) => {
+    if (m.tasks?.length) {
+      m.tasks.forEach((t) => {
+        const estMins = parseDurationMins(t.estimated_time);
+        totalMins += estMins;
+        if (!t.completed) {
+          scheduledIncompleteMins += t.allocated_time_mins || 0;
+        }
+      });
+    } else if (!m.completed) {
+      totalMins += 60;
+    }
+  });
+
+  const loggedMins = goal.time_spent_mins || 0;
+  const totalHours = totalMins / 60;
+  const loggedHours = loggedMins / 60;
+  const scheduledIncompleteHours = scheduledIncompleteMins / 60;
+
+  const pct = (part, whole) => (whole > 0 ? Math.min(100, (part / whole) * 100) : 0);
+
+  return {
+    totalHours,
+    loggedHours,
+    scheduledIncompleteHours,
+    loggedPct: pct(loggedHours, totalHours),
+    scheduledPct: pct(scheduledIncompleteHours, totalHours),
+    remainingHours: Math.max(0, totalHours - loggedHours - scheduledIncompleteHours),
+    remainingPct: pct(Math.max(0, totalHours - loggedHours - scheduledIncompleteHours), totalHours),
+  };
+}
+
+function formatHours(hours) {
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  const rounded = Math.round(hours * 10) / 10;
+  return `${rounded}h`;
+}
+
 export default function ProjectsManager() {
   const [state, setState] = useAppState();
-  
+
   // Sort states
-  const [sortBy, setSortBy] = useState('status'); // 'duedate', 'skills', 'status'
-  
+  const [sortBy, setSortBy] = useState('status'); // 'duedate', 'skills', 'status', 'priority'
+
   // Create Goal form states
   const [newGoalTitle, setNewGoalTitle] = useState('');
   const [newGoalDesc, setNewGoalDesc] = useState('');
-  
+  const [newGoalPriority, setNewGoalPriority] = useState(1);
+
   // Milestone task form states (for adding whole milestones)
   const [newTaskText, setNewTaskText] = useState('');
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
@@ -23,16 +98,15 @@ export default function ProjectsManager() {
   const [nestedTaskResource, setNestedTaskResource] = useState({});
   const [nestedTaskDueDate, setNestedTaskDueDate] = useState({});
   const [activeAddTaskId, setActiveAddTaskId] = useState(null);
-  
-  // Reflection check-in form states
-  const [reflectionText, setReflectionText] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Filter states
   const [filterStatus, setFilterStatus] = useState('All');
 
   // List vs detail navigation
   const [view, setView] = useState('list');
+
+  // Milestone task collapse state (milestone index -> collapsed)
+  const [collapsedMilestones, setCollapsedMilestones] = useState({});
 
   // Skill Editor states
   const [newSkillName, setNewSkillName] = useState('');
@@ -42,6 +116,7 @@ export default function ProjectsManager() {
   const [isEditingGoal, setIsEditingGoal] = useState(false);
   const [editGoalTitle, setEditGoalTitle] = useState('');
   const [editGoalDesc, setEditGoalDesc] = useState('');
+  const [editGoalPriority, setEditGoalPriority] = useState(1);
 
   // Milestone Editing states
   const [editingMilestoneIdx, setEditingMilestoneIdx] = useState(null);
@@ -88,16 +163,16 @@ export default function ProjectsManager() {
   // Filtering and Sorting logic helper
   const getSortedAndFilteredGoals = () => {
     let goalsCopy = [...state.goals];
-    
+
     if (filterStatus !== 'All') {
       goalsCopy = goalsCopy.filter(g => g.status === filterStatus);
     }
-    
+
     if (sortBy === 'status') {
       const order = { 'in-progress': 0, 'to-do': 1, 'done': 2, 'archived': 3 };
       return goalsCopy.sort((a, b) => (order[a.status] ?? 4) - (order[b.status] ?? 4));
     }
-    
+
     if (sortBy === 'duedate') {
       // Sort by earliest uncompleted milestone due date
       const getEarliestDueDate = (goal) => {
@@ -124,10 +199,20 @@ export default function ProjectsManager() {
       return goalsCopy.sort((a, b) => (b.skills || []).length - (a.skills || []).length);
     }
 
+    if (sortBy === 'priority') {
+      return goalsCopy.sort(
+        (a, b) => normalizePriority(b.priority) - normalizePriority(a.priority)
+      );
+    }
+
     return goalsCopy;
   };
 
   const sortedGoals = getSortedAndFilteredGoals();
+  const totalProjectCount = state.goals.length;
+  const filteredProjectCount = sortedGoals.length;
+  const capacityWarning = state.goals.find((g) => g.scheduling_warning)?.scheduling_warning;
+  const goalHoursStats = activeGoal ? computeGoalHoursStats(activeGoal) : null;
 
   const openProject = (goalId) => {
     setState({ activeGoalId: goalId });
@@ -136,7 +221,26 @@ export default function ProjectsManager() {
     setEditingMilestoneIdx(null);
     setEditingTaskKey(null);
     setActiveAddTaskId(null);
+    setCollapsedMilestones({});
   };
+
+  const toggleMilestoneCollapse = (mIdx) => {
+    setCollapsedMilestones((prev) => ({ ...prev, [mIdx]: !prev[mIdx] }));
+  };
+
+  const collapseAllMilestones = () => {
+    if (!activeGoal?.sub_projects) return;
+    const all = {};
+    activeGoal.sub_projects.forEach((_, idx) => { all[idx] = true; });
+    setCollapsedMilestones(all);
+  };
+
+  const expandAllMilestones = () => {
+    setCollapsedMilestones({});
+  };
+
+  const allMilestonesCollapsed = activeGoal?.sub_projects?.length > 0
+    && activeGoal.sub_projects.every((_, idx) => collapsedMilestones[idx]);
 
   const goBackToList = () => {
     setView('list');
@@ -144,6 +248,12 @@ export default function ProjectsManager() {
     setEditingMilestoneIdx(null);
     setEditingTaskKey(null);
     setActiveAddTaskId(null);
+  };
+
+  const openReflectionAgent = () => {
+    if (activeGoal) {
+      setState({ activeTab: 'reflection', activeGoalId: activeGoal.id });
+    }
   };
 
   const handleCreateGoal = async (e) => {
@@ -154,6 +264,7 @@ export default function ProjectsManager() {
       title: newGoalTitle,
       description: newGoalDesc,
       status: 'to-do',
+      priority: normalizePriority(newGoalPriority),
       sub_projects: [],
       skills: [],
       conversations: []
@@ -182,6 +293,7 @@ export default function ProjectsManager() {
     }
     setNewGoalTitle('');
     setNewGoalDesc('');
+    setNewGoalPriority(1);
   };
 
   const handleUpdateStatus = async (goalId, newStatus) => {
@@ -205,10 +317,10 @@ export default function ProjectsManager() {
     if (!newTaskText.trim() || !activeGoal) return;
 
     const defaultDueDate = newTaskDueDate || new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const newMilestone = { 
-      title: newTaskText, 
+    const newMilestone = {
+      title: newTaskText,
       description: "Custom milestone",
-      completed: false, 
+      completed: false,
       dueDate: defaultDueDate,
       tasks: []
     };
@@ -233,7 +345,7 @@ export default function ProjectsManager() {
 
   const handleToggleTask = async (milestoneIdx, taskIdx = null) => {
     if (!activeGoal) return;
-    
+
     let updatedSubProjects;
     if (taskIdx === null) {
       // Toggle milestone itself
@@ -249,7 +361,7 @@ export default function ProjectsManager() {
       // Toggle nested task
       updatedSubProjects = activeGoal.sub_projects.map((m, mIdx) => {
         if (mIdx === milestoneIdx) {
-          const updatedTasks = m.tasks.map((t, tId) => 
+          const updatedTasks = m.tasks.map((t, tId) =>
             tId === taskIdx ? { ...t, completed: !t.completed } : t
           );
           const allCompleted = updatedTasks.every(t => t.completed);
@@ -277,7 +389,7 @@ export default function ProjectsManager() {
   const handleAddNestedTask = async (e, milestoneIdx) => {
     e.preventDefault();
     if (!activeGoal) return;
-    
+
     const title = nestedTaskTitle[milestoneIdx]?.trim();
     if (!title) return;
 
@@ -404,7 +516,8 @@ export default function ProjectsManager() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: editGoalTitle,
-          description: editGoalDesc
+          description: editGoalDesc,
+          priority: normalizePriority(editGoalPriority),
         })
       });
       if (res.ok) {
@@ -554,31 +667,6 @@ export default function ProjectsManager() {
     }
   };
 
-  const handleSubmitReflection = async (e) => {
-    e.preventDefault();
-    if (!reflectionText.trim() || !activeGoal) return;
-    setIsSubmitting(true);
-
-    try {
-      const res = await fetch(`/api/goals/${activeGoal.id}/reflect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          reflection_text: reflectionText
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setState({ goals: data.goals });
-      }
-    } catch (err) {
-      console.error("Failed to post reflection:", err);
-    }
-
-    setReflectionText('');
-    setIsSubmitting(false);
-  };
-
   if (view === 'list') {
     return (
       <div style={styles.container} className="animate-fade-in">
@@ -588,24 +676,40 @@ export default function ProjectsManager() {
             <p style={styles.pageSubtitle}>Manage your learning projects, milestones, and skill mappings.</p>
           </div>
 
+          {capacityWarning && (
+            <div style={styles.warningBanner} className="glass-card">
+              <strong>⚠️ Scheduling capacity warning:</strong> {capacityWarning}
+            </div>
+          )}
+
           <div style={styles.createBox} className="glass-card">
             <h3 style={styles.sectionTitle}>Add New Goal 🎯</h3>
             <form onSubmit={handleCreateGoal} style={styles.createForm}>
-              <input 
-                type="text" 
-                value={newGoalTitle} 
-                onChange={(e) => setNewGoalTitle(e.target.value)} 
+              <input
+                type="text"
+                value={newGoalTitle}
+                onChange={(e) => setNewGoalTitle(e.target.value)}
                 placeholder="Goal Title (e.g. Master LangChain)"
                 style={styles.textInput}
                 required
               />
-              <input 
-                type="text" 
-                value={newGoalDesc} 
-                onChange={(e) => setNewGoalDesc(e.target.value)} 
+              <input
+                type="text"
+                value={newGoalDesc}
+                onChange={(e) => setNewGoalDesc(e.target.value)}
                 placeholder="Description"
                 style={styles.textInput}
               />
+              <select
+                value={newGoalPriority}
+                onChange={(e) => setNewGoalPriority(Number(e.target.value))}
+                style={styles.sortSelect}
+                title="Project priority"
+              >
+                <option value={2}>High urgency</option>
+                <option value={1}>Medium urgency</option>
+                <option value={0}>Low urgency</option>
+              </select>
               <button type="submit" style={styles.submitBtn}>
                 Create Goal
               </button>
@@ -613,10 +717,15 @@ export default function ProjectsManager() {
           </div>
 
           <div style={styles.goalsListHeader}>
-            <span style={styles.listTitle}>Your Projects</span>
+            <div style={styles.listTitleRow}>
+              <span style={styles.listTitle}>Your Projects</span>
+              <span style={styles.projectCount}>
+                {filteredProjectCount} of {totalProjectCount} projects
+              </span>
+            </div>
             <div style={styles.sortContainer}>
               <label style={styles.sortLabel}>Status:</label>
-              <select 
+              <select
                 value={filterStatus}
                 onChange={(e) => setFilterStatus(e.target.value)}
                 style={styles.sortSelect}
@@ -629,12 +738,13 @@ export default function ProjectsManager() {
               </select>
 
               <label style={styles.sortLabel}>Sort:</label>
-              <select 
-                value={sortBy} 
+              <select
+                value={sortBy}
                 onChange={(e) => setSortBy(e.target.value)}
                 style={styles.sortSelect}
               >
                 <option value="status">Status</option>
+                <option value="priority">Priority</option>
                 <option value="duedate">Due Date</option>
                 <option value="skills">Skills count</option>
               </select>
@@ -643,36 +753,47 @@ export default function ProjectsManager() {
 
           <div style={styles.goalsGrid}>
             {sortedGoals.length === 0 ? (
-              <div style={styles.emptyText} className="glass-card">No goals created yet. Create one above to get started.</div>
+              <div style={styles.emptyText} className="glass-card">
+                {totalProjectCount === 0
+                  ? 'No goals created yet. Create one above to get started.'
+                  : 'No projects match the current filter.'}
+              </div>
             ) : (
-              sortedGoals.map((g) => (
-                <div 
-                  key={g.id} 
-                  onClick={() => openProject(g.id)}
-                  style={styles.goalCard}
-                  className="glass-card"
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openProject(g.id); }}
-                >
-                  <div style={styles.goalCardHeader}>
-                    <h4 style={styles.goalTitle}>{g.title}</h4>
-                    <span style={{
-                      ...styles.statusBadge,
-                      backgroundColor: g.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : g.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(120, 120, 120, 0.15)',
-                      color: g.status === 'done' ? 'var(--color-success)' : g.status === 'in-progress' ? 'var(--color-accent)' : 'var(--color-text-muted)'
-                    }}>
-                      {g.status}
-                    </span>
+              sortedGoals.map((g) => {
+                const cardHours = computeGoalHoursStats(g);
+                return (
+                  <div
+                    key={g.id}
+                    onClick={() => openProject(g.id)}
+                    style={styles.goalCard}
+                    className="glass-card"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openProject(g.id); }}
+                  >
+                    <div style={styles.goalCardHeader}>
+                      <h4 style={styles.goalTitle}>{g.title}</h4>
+                      <span style={{
+                        ...styles.statusBadge,
+                        backgroundColor: g.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : g.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(120, 120, 120, 0.15)',
+                        color: g.status === 'done' ? 'var(--color-success)' : g.status === 'in-progress' ? 'var(--color-accent)' : 'var(--color-text-muted)'
+                      }}>
+                        {g.status}
+                      </span>
+                    </div>
+                    <p style={styles.goalDesc}>{g.description || 'No description'}</p>
+                    <div style={styles.goalFooter}>
+                      <span>🎯 {priorityLabel(g.priority)}</span>
+                      <span>📋 {(g.sub_projects || []).length} milestones</span>
+                      <span>⚙️ {(g.skills || []).length} skills</span>
+                      {cardHours.totalHours > 0 && (
+                        <span>🕐 {formatHours(cardHours.totalHours)} total</span>
+                      )}
+                      <span>⏱️ {g.time_spent_mins || 0}m logged</span>
+                    </div>
                   </div>
-                  <p style={styles.goalDesc}>{g.description || 'No description'}</p>
-                  <div style={styles.goalFooter}>
-                    <span>📋 {(g.sub_projects || []).length} milestones</span>
-                    <span>⚙️ {(g.skills || []).length} skills</span>
-                    <span>⏱️ {g.time_spent_mins || 0}m logged</span>
-                  </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
@@ -683,38 +804,60 @@ export default function ProjectsManager() {
   return (
     <div style={styles.container} className="animate-fade-in">
       <div style={styles.detailPage}>
-        <button type="button" onClick={goBackToList} style={styles.backBtn}>
-          ← Back to Projects
-        </button>
+        <div style={styles.detailTopNav}>
+          <button type="button" onClick={goBackToList} style={styles.backBtn}>
+            ← Back to Projects
+          </button>
+          <button type="button" onClick={openReflectionAgent} style={styles.nextBtn}>
+            ✍️ Reflection Agent →
+          </button>
+        </div>
 
         {activeGoal ? (
           <div style={styles.detailCard} className="glass-card">
+            {activeGoal.scheduling_warning && (
+              <div style={styles.warningBanner}>
+                <strong>⚠️ Scheduling warning:</strong> {activeGoal.scheduling_warning}
+              </div>
+            )}
             <div style={styles.detailHeader}>
               {isEditingGoal ? (
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px', marginRight: '16px' }}>
-                  <input 
-                    type="text" 
-                    value={editGoalTitle} 
-                    onChange={(e) => setEditGoalTitle(e.target.value)} 
+                  <input
+                    type="text"
+                    value={editGoalTitle}
+                    onChange={(e) => setEditGoalTitle(e.target.value)}
                     style={styles.textInputSmall}
                     placeholder="Goal Title"
                   />
-                  <input 
-                    type="text" 
-                    value={editGoalDesc} 
-                    onChange={(e) => setEditGoalDesc(e.target.value)} 
+                  <input
+                    type="text"
+                    value={editGoalDesc}
+                    onChange={(e) => setEditGoalDesc(e.target.value)}
                     style={styles.textInputSmall}
                     placeholder="Goal Description"
                   />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <label style={styles.smallLabel}>Priority:</label>
+                    <select
+                      value={editGoalPriority}
+                      onChange={(e) => setEditGoalPriority(Number(e.target.value))}
+                      style={styles.selectInput}
+                    >
+                      <option value={2}>High urgency</option>
+                      <option value={1}>Medium urgency</option>
+                      <option value={0}>Low urgency</option>
+                    </select>
+                  </div>
                   <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-                    <button 
-                      onClick={() => handleSaveGoal(activeGoal.id)} 
+                    <button
+                      onClick={() => handleSaveGoal(activeGoal.id)}
                       style={styles.addTaskBtn}
                     >
                       Save Goal
                     </button>
-                    <button 
-                      onClick={() => setIsEditingGoal(false)} 
+                    <button
+                      onClick={() => setIsEditingGoal(false)}
                       style={styles.cancelBtn}
                     >
                       Cancel
@@ -725,48 +868,40 @@ export default function ProjectsManager() {
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <h2 style={styles.detailTitle}>{activeGoal.title}</h2>
-                    <button 
+                    <button
+                      type="button"
                       onClick={() => {
                         setEditGoalTitle(activeGoal.title);
                         setEditGoalDesc(activeGoal.description || '');
+                        setEditGoalPriority(normalizePriority(activeGoal.priority));
                         setIsEditingGoal(true);
-                      }} 
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: 'var(--color-accent)',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        padding: '2px 6px',
-                        borderRadius: '4px',
                       }}
-                      title="Edit Goal"
+                      style={styles.iconBtnAccent}
+                      title="Edit goal"
+                      aria-label="Edit goal"
                     >
-                      ✏️ Edit
+                      ✏️
                     </button>
-                    <button 
-                      onClick={() => handleDeleteGoal(activeGoal.id)} 
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: '#fb7185',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        padding: '2px 6px',
-                        borderRadius: '4px',
-                      }}
-                      title="Delete Goal"
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteGoal(activeGoal.id)}
+                      style={styles.iconBtnDanger}
+                      title="Delete goal"
+                      aria-label="Delete goal"
                     >
-                      🗑️ Delete
+                      🗑️
                     </button>
                   </div>
                   <p style={styles.detailSubtitle}>{activeGoal.description}</p>
+                  <span style={styles.priorityBadge}>
+                    Priority: {priorityLabel(activeGoal.priority)}
+                  </span>
                 </div>
               )}
               <div style={styles.statusSelectRow}>
                 <label style={styles.smallLabel}>Status:</label>
-                <select 
-                  value={activeGoal.status} 
+                <select
+                  value={activeGoal.status}
                   onChange={(e) => handleUpdateStatus(activeGoal.id, e.target.value)}
                   style={styles.selectInput}
                 >
@@ -778,50 +913,104 @@ export default function ProjectsManager() {
               </div>
             </div>
 
+            {goalHoursStats && goalHoursStats.totalHours > 0 && (
+              <div style={styles.hoursProgressSection}>
+                <div style={styles.hoursProgressHeader}>
+                  <span style={styles.hoursProgressTitle}>Time progress</span>
+                  <span style={styles.hoursProgressSummary}>
+                    {formatHours(goalHoursStats.loggedHours)} logged · {formatHours(goalHoursStats.totalHours)} total
+                  </span>
+                </div>
+                <div style={styles.hoursProgressBar} role="progressbar" aria-valuenow={goalHoursStats.loggedPct + goalHoursStats.scheduledPct} aria-valuemin={0} aria-valuemax={100}>
+                  {goalHoursStats.loggedPct > 0 && (
+                    <div
+                      style={{ ...styles.hoursBarSegment, width: `${goalHoursStats.loggedPct}%`, backgroundColor: 'var(--color-success, #10b981)' }}
+                      title={`Logged: ${formatHours(goalHoursStats.loggedHours)} (${Math.round(goalHoursStats.loggedPct)}%)`}
+                    />
+                  )}
+                  {goalHoursStats.scheduledPct > 0 && (
+                    <div
+                      style={{ ...styles.hoursBarSegment, width: `${goalHoursStats.scheduledPct}%`, backgroundColor: 'var(--color-accent)' }}
+                      title={`Scheduled (incomplete): ${formatHours(goalHoursStats.scheduledIncompleteHours)} (${Math.round(goalHoursStats.scheduledPct)}%)`}
+                    />
+                  )}
+                </div>
+                <div style={styles.hoursProgressLegend}>
+                  <span style={styles.legendItem}>
+                    <span style={{ ...styles.legendDot, backgroundColor: 'var(--color-success, #10b981)' }} />
+                    Logged {Math.round(goalHoursStats.loggedPct)}%
+                  </span>
+                  <span style={styles.legendItem}>
+                    <span style={{ ...styles.legendDot, backgroundColor: 'var(--color-accent)' }} />
+                    Scheduled (incomplete) {Math.round(goalHoursStats.scheduledPct)}%
+                  </span>
+                  {goalHoursStats.remainingPct > 0 && (
+                    <span style={styles.legendItem}>
+                      <span style={{ ...styles.legendDot, backgroundColor: 'rgba(255,255,255,0.12)' }} />
+                      Remaining {Math.round(goalHoursStats.remainingPct)}%
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Checklist section */}
             <div style={styles.detailSection}>
-              <h3 style={styles.subTitle}>📋 Milestones & Learning Map</h3>
+              <div style={styles.milestonesSectionHeader}>
+                <h3 style={{ ...styles.subTitle, marginBottom: 0 }}>📋 Milestones & Learning Map</h3>
+                {activeGoal.sub_projects?.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={allMilestonesCollapsed ? expandAllMilestones : collapseAllMilestones}
+                    style={styles.collapseAllBtn}
+                    title={allMilestonesCollapsed ? 'Expand all task lists' : 'Collapse all task lists'}
+                  >
+                    {allMilestonesCollapsed ? '▸ Expand all' : '▾ Collapse all'}
+                  </button>
+                )}
+              </div>
               <div>
                 {activeGoal.sub_projects && activeGoal.sub_projects.map((milestone, mIdx) => {
                   const hasTasks = milestone.tasks && milestone.tasks.length > 0;
+                  const tasksCollapsed = !!collapsedMilestones[mIdx];
                   return (
                     <div key={mIdx} style={styles.milestoneSection} className="glass-card">
                       {/* Milestone Header */}
                       {editingMilestoneIdx === mIdx ? (
                         <div style={styles.milestoneHeader}>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1 }}>
-                            <input 
-                              type="text" 
-                              value={editMilestoneTitle} 
-                              onChange={(e) => setEditMilestoneTitle(e.target.value)} 
+                            <input
+                              type="text"
+                              value={editMilestoneTitle}
+                              onChange={(e) => setEditMilestoneTitle(e.target.value)}
                               style={styles.textInputSmall}
                               placeholder="Milestone Title"
                             />
-                            <input 
-                              type="text" 
-                              value={editMilestoneDesc} 
-                              onChange={(e) => setEditMilestoneDesc(e.target.value)} 
+                            <input
+                              type="text"
+                              value={editMilestoneDesc}
+                              onChange={(e) => setEditMilestoneDesc(e.target.value)}
                               style={styles.textInputSmall}
                               placeholder="Milestone Description"
                             />
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                               <label style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>Due Date:</label>
-                              <input 
-                                type="date" 
-                                value={editMilestoneDueDate} 
-                                onChange={(e) => setEditMilestoneDueDate(e.target.value)} 
+                              <input
+                                type="date"
+                                value={editMilestoneDueDate}
+                                onChange={(e) => setEditMilestoneDueDate(e.target.value)}
                                 style={styles.dateInput}
                               />
                             </div>
                             <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-                              <button 
-                                onClick={() => handleSaveMilestone(mIdx)} 
+                              <button
+                                onClick={() => handleSaveMilestone(mIdx)}
                                 style={styles.addTaskBtn}
                               >
                                 Save
                               </button>
-                              <button 
-                                onClick={() => setEditingMilestoneIdx(null)} 
+                              <button
+                                onClick={() => setEditingMilestoneIdx(null)}
                                 style={styles.cancelBtn}
                               >
                                 Cancel
@@ -832,10 +1021,22 @@ export default function ProjectsManager() {
                       ) : (
                         <div style={styles.milestoneHeader}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1 }}>
-                            <input 
-                              type="checkbox" 
-                              checked={milestone.completed || false} 
-                              onChange={() => handleToggleTask(mIdx)} 
+                            {hasTasks && (
+                              <button
+                                type="button"
+                                onClick={() => toggleMilestoneCollapse(mIdx)}
+                                style={styles.collapseToggleBtn}
+                                title={tasksCollapsed ? 'Expand tasks' : 'Collapse tasks'}
+                                aria-label={tasksCollapsed ? 'Expand tasks' : 'Collapse tasks'}
+                                aria-expanded={!tasksCollapsed}
+                              >
+                                {tasksCollapsed ? '▸' : '▾'}
+                              </button>
+                            )}
+                            <input
+                              type="checkbox"
+                              checked={milestone.completed || false}
+                              onChange={() => handleToggleTask(mIdx)}
                               style={styles.checkbox}
                             />
                             <div>
@@ -859,25 +1060,29 @@ export default function ProjectsManager() {
                               )}
                             </div>
                           </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <button 
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <button
+                              type="button"
                               onClick={() => {
                                 setEditMilestoneTitle(milestone.title);
                                 setEditMilestoneDesc(milestone.description || '');
                                 setEditMilestoneDueDate(milestone.dueDate || '');
                                 setEditingMilestoneIdx(mIdx);
                               }}
-                              style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '12px' }}
-                              title="Edit Milestone"
+                              style={styles.iconBtnAccent}
+                              title="Edit milestone"
+                              aria-label="Edit milestone"
                             >
-                              ✏️ Edit
+                              ✏️
                             </button>
-                            <button 
+                            <button
+                              type="button"
                               onClick={() => handleDeleteMilestone(mIdx)}
-                              style={{ background: 'none', border: 'none', color: '#fb7185', cursor: 'pointer', fontSize: '12px' }}
-                              title="Delete Milestone"
+                              style={styles.iconBtnDanger}
+                              title="Delete milestone"
+                              aria-label="Delete milestone"
                             >
-                              🗑️ Delete
+                              🗑️
                             </button>
                             {milestone.dueDate && (
                               <span style={{
@@ -893,220 +1098,221 @@ export default function ProjectsManager() {
                       )}
 
                       {/* Nested Tasks */}
-                      <div style={styles.nestedTasksContainer}>
-                        {hasTasks ? (
-                          milestone.tasks.map((task, tIdx) => (
-                            editingTaskKey === `${mIdx}-${tIdx}` ? (
-                              <div key={tIdx} style={styles.taskItem}>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                  <input 
-                                    type="text" 
-                                    value={editTaskTitle} 
-                                    onChange={(e) => setEditTaskTitle(e.target.value)} 
-                                    style={styles.textInputSmall}
-                                    placeholder="Task Title"
-                                  />
-                                  <input 
-                                    type="text" 
-                                    value={editTaskDesc} 
-                                    onChange={(e) => setEditTaskDesc(e.target.value)} 
-                                    style={styles.textInputSmall}
-                                    placeholder="Task Description"
-                                  />
-                                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                                    <input 
-                                      type="text" 
-                                      value={editTaskTime} 
-                                      onChange={(e) => setEditTaskTime(e.target.value)} 
-                                      style={{ ...styles.nestedInput, width: '120px' }}
-                                      placeholder="Time (e.g. 2 hours)"
+                      {!tasksCollapsed && (
+                        <div style={styles.nestedTasksContainer}>
+                          {hasTasks ? (
+                            milestone.tasks.map((task, tIdx) => (
+                              editingTaskKey === `${mIdx}-${tIdx}` ? (
+                                <div key={tIdx} style={styles.taskItem}>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                    <input
+                                      type="text"
+                                      value={editTaskTitle}
+                                      onChange={(e) => setEditTaskTitle(e.target.value)}
+                                      style={styles.textInputSmall}
+                                      placeholder="Task Title"
                                     />
-                                    <input 
-                                      type="date" 
-                                      value={editTaskDueDate} 
-                                      onChange={(e) => setEditTaskDueDate(e.target.value)} 
-                                      style={styles.dateInput}
+                                    <input
+                                      type="text"
+                                      value={editTaskDesc}
+                                      onChange={(e) => setEditTaskDesc(e.target.value)}
+                                      style={styles.textInputSmall}
+                                      placeholder="Task Description"
                                     />
-                                  </div>
-                                  <input 
-                                    type="text" 
-                                    value={editTaskResource} 
-                                    onChange={(e) => setEditTaskResource(e.target.value)} 
-                                    style={styles.textInputSmall}
-                                    placeholder="Resource / URL"
-                                  />
-                                  <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '4px' }}>
-                                    <button 
-                                      onClick={() => handleSaveTask(mIdx, tIdx)} 
-                                      style={styles.submitNestedBtn}
-                                    >
-                                      Save Task
-                                    </button>
-                                    <button 
-                                      onClick={() => setEditingTaskKey(null)} 
-                                      style={styles.cancelBtn}
-                                    >
-                                      Cancel
-                                    </button>
+                                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                      <input
+                                        type="text"
+                                        value={editTaskTime}
+                                        onChange={(e) => setEditTaskTime(e.target.value)}
+                                        style={{ ...styles.nestedInput, width: '120px' }}
+                                        placeholder="Time (e.g. 2 hours)"
+                                      />
+                                      <input
+                                        type="date"
+                                        value={editTaskDueDate}
+                                        onChange={(e) => setEditTaskDueDate(e.target.value)}
+                                        style={styles.dateInput}
+                                      />
+                                    </div>
+                                    <input
+                                      type="text"
+                                      value={editTaskResource}
+                                      onChange={(e) => setEditTaskResource(e.target.value)}
+                                      style={styles.textInputSmall}
+                                      placeholder="Resource / URL"
+                                    />
+                                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '4px' }}>
+                                      <button
+                                        onClick={() => handleSaveTask(mIdx, tIdx)}
+                                        style={styles.submitNestedBtn}
+                                      >
+                                        Save Task
+                                      </button>
+                                      <button
+                                        onClick={() => setEditingTaskKey(null)}
+                                        style={styles.cancelBtn}
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
-                            ) : (
-                              <div key={tIdx} style={styles.taskItem}>
-                                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                                  <input 
-                                    type="checkbox" 
-                                    checked={task.completed || false} 
-                                    onChange={() => handleToggleTask(mIdx, tIdx)} 
-                                    style={{ ...styles.checkbox, marginTop: '4px' }}
-                                  />
-                                  <div style={{ flex: 1 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                                      <span style={{
-                                        fontWeight: '600',
-                                        fontSize: '13px',
-                                        textDecoration: task.completed ? 'line-through' : 'none',
-                                        color: task.completed ? 'var(--color-text-muted)' : 'var(--color-text-main)'
-                                      }}>
-                                        {task.title}
-                                      </span>
-                                      {task.estimated_time && (
-                                        <span style={styles.durationBadge}>
-                                          ⏱️ {task.estimated_time}
-                                        </span>
-                                      )}
-                                      {task.dueDate && (
+                              ) : (
+                                <div key={tIdx} style={styles.taskItem}>
+                                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={task.completed || false}
+                                      onChange={() => handleToggleTask(mIdx, tIdx)}
+                                      style={{ ...styles.checkbox, marginTop: '4px' }}
+                                    />
+                                    <div style={{ flex: 1 }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                                         <span style={{
-                                          ...styles.dueDateBadge,
-                                          fontSize: '10px',
-                                          padding: '1px 6px',
-                                          backgroundColor: task.completed ? 'rgba(255,255,255,0.03)' : 'rgba(239, 68, 68, 0.08)',
-                                          color: task.completed ? 'var(--color-text-muted)' : '#f87171'
+                                          fontWeight: '600',
+                                          fontSize: '13px',
+                                          textDecoration: task.completed ? 'line-through' : 'none',
+                                          color: task.completed ? 'var(--color-text-muted)' : 'var(--color-text-main)'
                                         }}>
-                                          Due: {task.dueDate}
+                                          {task.title}
                                         </span>
-                                      )}
-                                    </div>
-                                    {task.description && (
-                                      <p style={styles.taskDescText}>
-                                        {task.description}
-                                      </p>
-                                    )}
-                                    {task.resource && (
-                                      <div style={styles.resourceBox}>
-                                        <span style={{ fontSize: '11px' }}>📖 Resource: </span>
-                                        {task.resource.startsWith('http') ? (
-                                          <a href={task.resource} target="_blank" rel="noopener noreferrer" style={styles.resourceLink}>
-                                            {task.resource}
-                                          </a>
-                                        ) : (
-                                          <span style={{ color: 'var(--color-text-muted)', fontSize: '11px' }}>{task.resource}</span>
+                                        {task.estimated_time && (
+                                          <span style={styles.durationBadge}>
+                                            ⏱️ {task.estimated_time}
+                                          </span>
                                         )}
-                                        <button 
-                                          onClick={() => handleClearResource(mIdx, tIdx)}
-                                          style={{
-                                            background: 'none',
-                                            border: 'none',
-                                            color: '#fb7185',
-                                            cursor: 'pointer',
+                                        {task.dueDate && (
+                                          <span style={{
+                                            ...styles.dueDateBadge,
                                             fontSize: '10px',
-                                            marginLeft: '8px'
+                                            padding: '1px 6px',
+                                            backgroundColor: task.completed ? 'rgba(255,255,255,0.03)' : 'rgba(239, 68, 68, 0.08)',
+                                            color: task.completed ? 'var(--color-text-muted)' : '#f87171'
+                                          }}>
+                                            Due: {task.dueDate}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {task.description && (
+                                        <p style={styles.taskDescText}>
+                                          {task.description}
+                                        </p>
+                                      )}
+                                      {task.resource && (
+                                        <div style={styles.resourceBox}>
+                                          <span style={{ fontSize: '11px' }}>📖 Resource: </span>
+                                          {task.resource.startsWith('http') ? (
+                                            <a href={task.resource} target="_blank" rel="noopener noreferrer" style={styles.resourceLink}>
+                                              {task.resource}
+                                            </a>
+                                          ) : (
+                                            <span style={{ color: 'var(--color-text-muted)', fontSize: '11px' }}>{task.resource}</span>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => handleClearResource(mIdx, tIdx)}
+                                            style={{ ...styles.iconBtnDanger, fontSize: '11px', marginLeft: '8px' }}
+                                            title="Clear resource link"
+                                            aria-label="Clear resource link"
+                                          >
+                                            ✕
+                                          </button>
+                                        </div>
+                                      )}
+                                      <div style={{ display: 'flex', gap: '4px', marginTop: '6px', justifyContent: 'flex-end' }}>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditTaskTitle(task.title);
+                                            setEditTaskDesc(task.description || '');
+                                            setEditTaskTime(task.estimated_time || '');
+                                            setEditTaskResource(task.resource || '');
+                                            setEditTaskDueDate(task.dueDate || '');
+                                            setEditingTaskKey(`${mIdx}-${tIdx}`);
                                           }}
-                                          title="Clear resource link"
+                                          style={styles.iconBtnAccent}
+                                          title="Edit task"
+                                          aria-label="Edit task"
                                         >
-                                          🗑️ Clear Resource
+                                          ✏️
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteTask(mIdx, tIdx)}
+                                          style={styles.iconBtnDanger}
+                                          title="Delete task"
+                                          aria-label="Delete task"
+                                        >
+                                          🗑️
                                         </button>
                                       </div>
-                                    )}
-                                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px', justifyContent: 'flex-end' }}>
-                                      <button 
-                                        onClick={() => {
-                                          setEditTaskTitle(task.title);
-                                          setEditTaskDesc(task.description || '');
-                                          setEditTaskTime(task.estimated_time || '');
-                                          setEditTaskResource(task.resource || '');
-                                          setEditTaskDueDate(task.dueDate || '');
-                                          setEditingTaskKey(`${mIdx}-${tIdx}`);
-                                        }}
-                                        style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px' }}
-                                        title="Edit Task"
-                                      >
-                                        ✏️ Edit Task
-                                      </button>
-                                      <button 
-                                        onClick={() => handleDeleteTask(mIdx, tIdx)}
-                                        style={{ background: 'none', border: 'none', color: '#fb7185', cursor: 'pointer', fontSize: '11px' }}
-                                        title="Delete Task"
-                                      >
-                                        🗑️ Delete Task
-                                      </button>
                                     </div>
                                   </div>
                                 </div>
-                              </div>
-                            )
-                          ))
-                        ) : (
-                          <div style={{ color: 'var(--color-text-muted)', fontSize: '12px', paddingLeft: '28px' }}>
-                            No sub-tasks added yet. Add a learning step below!
-                          </div>
-                        )}
+                              )
+                            ))
+                          ) : (
+                            <div style={{ color: 'var(--color-text-muted)', fontSize: '12px', paddingLeft: '28px' }}>
+                              No sub-tasks added yet. Add a learning step below!
+                            </div>
+                          )}
 
-                        {/* Inline Add Task Form for this Milestone */}
-                        {activeAddTaskId === mIdx ? (
-                          <form onSubmit={(e) => handleAddNestedTask(e, mIdx)} style={styles.nestedTaskForm}>
-                            <div style={styles.formRow}>
-                              <input 
+                          {/* Inline Add Task Form for this Milestone */}
+                          {activeAddTaskId === mIdx ? (
+                            <form onSubmit={(e) => handleAddNestedTask(e, mIdx)} style={styles.nestedTaskForm}>
+                              <div style={styles.formRow}>
+                                <input
+                                  type="text"
+                                  value={nestedTaskTitle[mIdx] || ''}
+                                  onChange={(e) => setNestedTaskTitle(prev => ({ ...prev, [mIdx]: e.target.value }))}
+                                  placeholder="Task Title (e.g. Variables and Data Types)"
+                                  style={styles.nestedInput}
+                                  required
+                                />
+                                <input
+                                  type="text"
+                                  value={nestedTaskTime[mIdx] || ''}
+                                  onChange={(e) => setNestedTaskTime(prev => ({ ...prev, [mIdx]: e.target.value }))}
+                                  placeholder="Time (e.g. 2 hours)"
+                                  style={{ ...styles.nestedInput, width: '120px' }}
+                                />
+                                <input
+                                  type="date"
+                                  value={nestedTaskDueDate[mIdx] || ''}
+                                  onChange={(e) => setNestedTaskDueDate(prev => ({ ...prev, [mIdx]: e.target.value }))}
+                                  style={{ ...styles.nestedInput, width: '130px' }}
+                                />
+                              </div>
+                              <input
                                 type="text"
-                                value={nestedTaskTitle[mIdx] || ''}
-                                onChange={(e) => setNestedTaskTitle(prev => ({ ...prev, [mIdx]: e.target.value }))}
-                                placeholder="Task Title (e.g. Variables and Data Types)"
-                                style={styles.nestedInput}
-                                required
+                                value={nestedTaskDesc[mIdx] || ''}
+                                onChange={(e) => setNestedTaskDesc(prev => ({ ...prev, [mIdx]: e.target.value }))}
+                                placeholder="Task Description (what to learn/build)"
+                                style={{ ...styles.nestedInput, marginTop: '6px' }}
                               />
-                              <input 
+                              <input
                                 type="text"
-                                value={nestedTaskTime[mIdx] || ''}
-                                onChange={(e) => setNestedTaskTime(prev => ({ ...prev, [mIdx]: e.target.value }))}
-                                placeholder="Time (e.g. 2 hours)"
-                                style={{ ...styles.nestedInput, width: '120px' }}
+                                value={nestedTaskResource[mIdx] || ''}
+                                onChange={(e) => setNestedTaskResource(prev => ({ ...prev, [mIdx]: e.target.value }))}
+                                placeholder="Resource / URL (e.g. MDN Web Docs)"
+                                style={{ ...styles.nestedInput, marginTop: '6px' }}
                               />
-                              <input 
-                                type="date"
-                                value={nestedTaskDueDate[mIdx] || ''}
-                                onChange={(e) => setNestedTaskDueDate(prev => ({ ...prev, [mIdx]: e.target.value }))}
-                                style={{ ...styles.nestedInput, width: '130px' }}
-                              />
-                            </div>
-                            <input 
-                              type="text"
-                              value={nestedTaskDesc[mIdx] || ''}
-                              onChange={(e) => setNestedTaskDesc(prev => ({ ...prev, [mIdx]: e.target.value }))}
-                              placeholder="Task Description (what to learn/build)"
-                              style={{ ...styles.nestedInput, marginTop: '6px' }}
-                            />
-                            <input 
-                              type="text"
-                              value={nestedTaskResource[mIdx] || ''}
-                              onChange={(e) => setNestedTaskResource(prev => ({ ...prev, [mIdx]: e.target.value }))}
-                              placeholder="Resource / URL (e.g. MDN Web Docs)"
-                              style={{ ...styles.nestedInput, marginTop: '6px' }}
-                            />
-                            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '8px' }}>
-                              <button type="button" onClick={() => setActiveAddTaskId(null)} style={styles.cancelBtn}>Cancel</button>
-                              <button type="submit" style={styles.submitNestedBtn}>Add Task</button>
-                            </div>
-                          </form>
-                        ) : (
-                          <button 
-                            type="button" 
-                            onClick={() => setActiveAddTaskId(mIdx)} 
-                            style={styles.addNestedBtn}
-                          >
-                            ➕ Add Task to Milestone
-                          </button>
-                        )}
-                      </div>
+                              <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '8px' }}>
+                                <button type="button" onClick={() => setActiveAddTaskId(null)} style={styles.cancelBtn}>Cancel</button>
+                                <button type="submit" style={styles.submitNestedBtn}>Add Task</button>
+                              </div>
+                            </form>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setActiveAddTaskId(mIdx)}
+                              style={styles.addNestedBtn}
+                            >
+                              ➕ Add Task to Milestone
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1115,15 +1321,15 @@ export default function ProjectsManager() {
                 <div style={{ marginTop: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '15px' }}>
                   <h4 style={{ fontSize: '14px', margin: '0 0 10px 0', color: 'var(--color-text-main)' }}>Add New Milestone Node</h4>
                   <form onSubmit={handleAddTask} style={styles.taskForm}>
-                    <input 
-                      type="text" 
-                      value={newTaskText} 
-                      onChange={(e) => setNewTaskText(e.target.value)} 
+                    <input
+                      type="text"
+                      value={newTaskText}
+                      onChange={(e) => setNewTaskText(e.target.value)}
                       placeholder="Milestone Title (e.g., Milestone 4: Advanced Frameworks)"
                       style={styles.textInputSmall}
                       required
                     />
-                    <input 
+                    <input
                       type="date"
                       value={newTaskDueDate}
                       onChange={(e) => setNewTaskDueDate(e.target.value)}
@@ -1139,15 +1345,15 @@ export default function ProjectsManager() {
             <div style={styles.detailSection}>
               <h3 style={styles.subTitle}>⚙️ Associated Skills Mappings</h3>
               <p style={styles.captionText}>Map out specific skills gained from this project, which will feed into your Skills Portfolio once completed.</p>
-              
+
               <div style={styles.skillsEditorGrid}>
                 {activeGoal.skills && activeGoal.skills.map((skill, sIdx) => (
                   <div key={sIdx} style={styles.editorSkillTag}>
                     <div>
-                      <strong>{skill.name}</strong> 
+                      <strong>{skill.name}</strong>
                       <span style={styles.tagCategory}>({skill.category})</span>
                     </div>
-                    <button 
+                    <button
                       onClick={() => handleRemoveSkill(sIdx)}
                       style={styles.deleteTagBtn}
                     >
@@ -1159,75 +1365,24 @@ export default function ProjectsManager() {
 
               {/* Add Skill Form */}
               <form onSubmit={handleAddSkill} style={styles.addSkillInlineForm}>
-                <input 
-                  type="text" 
-                  value={newSkillName} 
-                  onChange={(e) => setNewSkillName(e.target.value)} 
+                <input
+                  type="text"
+                  value={newSkillName}
+                  onChange={(e) => setNewSkillName(e.target.value)}
                   placeholder="Skill Name (e.g. LLM Fine-Tuning)"
                   style={styles.textInputSmall}
                   required
                 />
-                <input 
-                  type="text" 
-                  value={newSkillCategory} 
-                  onChange={(e) => setNewSkillCategory(e.target.value)} 
+                <input
+                  type="text"
+                  value={newSkillCategory}
+                  onChange={(e) => setNewSkillCategory(e.target.value)}
                   placeholder="Category (e.g. AI Engineering)"
                   style={styles.textInputSmall}
                 />
                 <button type="submit" style={styles.addTaskBtn}>Add Skill</button>
               </form>
             </div>
-
-            {/* Reflection Submit Form */}
-            <div style={styles.detailSection}>
-              <h3 style={styles.subTitle}>✍️ Log Learning Check-in & Reflections</h3>
-              <p style={styles.captionText}>Log check-ins to let the concierge adjust milestone pacing and shift remaining due dates.</p>
-              
-              <form onSubmit={handleSubmitReflection} style={styles.reflectForm}>
-
-
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Reflection Details / Work Log:</label>
-                  <textarea
-                    value={reflectionText}
-                    onChange={(e) => setReflectionText(e.target.value)}
-                    placeholder="Describe what you did, any bottlenecks, or if you need timeline buffers."
-                    style={styles.textareaInput}
-                    rows="3"
-                    required
-                  />
-                </div>
-
-                <button type="submit" style={styles.submitReflectBtn} disabled={isSubmitting}>
-                  {isSubmitting ? 'Submitting...' : 'Upload Work Log & Recalibrate Milestones'}
-                </button>
-              </form>
-            </div>
-
-            {/* Reflections Chat history */}
-            {activeGoal.conversations && activeGoal.conversations.length > 0 && (
-              <div style={styles.detailSection}>
-                <h3 style={styles.subTitle}>💬 Timeline Recalibration Conversations</h3>
-                <div style={styles.convLog}>
-                  {activeGoal.conversations.map((msg, idx) => (
-                    <div 
-                      key={idx} 
-                      style={{
-                        ...styles.chatBubble,
-                        alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                        backgroundColor: msg.role === 'user' ? 'rgba(99, 102, 241, 0.15)' : 'var(--bg-sidebar)',
-                        borderColor: msg.role === 'user' ? 'var(--color-accent)' : 'var(--border-card)'
-                      }}
-                    >
-                      <div style={styles.bubbleMeta}>
-                        <strong>{msg.role === 'user' ? 'You' : 'Skill Concierge Agent'}</strong>
-                      </div>
-                      <p style={styles.bubbleText}>{msg.text}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         ) : (
           <div style={styles.emptyCard} className="glass-card">
@@ -1257,6 +1412,25 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: '16px',
+  },
+  detailTopNav: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  nextBtn: {
+    backgroundColor: 'var(--color-accent)',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: '8px',
+    padding: '8px 16px',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   pageHeader: {
     marginBottom: '4px',
@@ -1288,9 +1462,29 @@ const styles = {
   },
   createForm: {
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr auto',
+    gridTemplateColumns: '1fr 1fr 140px auto',
     gap: '10px',
     alignItems: 'center',
+  },
+  warningBanner: {
+    padding: '12px 16px',
+    borderRadius: '8px',
+    border: '1px solid rgba(251, 191, 36, 0.35)',
+    backgroundColor: 'rgba(251, 191, 36, 0.1)',
+    color: 'var(--color-text-main)',
+    fontSize: '12px',
+    lineHeight: '1.5',
+    marginBottom: '8px',
+  },
+  priorityBadge: {
+    display: 'inline-block',
+    marginTop: '8px',
+    fontSize: '11px',
+    fontWeight: '600',
+    padding: '3px 10px',
+    borderRadius: '12px',
+    backgroundColor: 'rgba(99, 102, 241, 0.12)',
+    color: 'var(--color-accent)',
   },
   sectionTitle: {
     fontSize: '15px',
@@ -1328,11 +1522,23 @@ const styles = {
     alignItems: 'center',
     padding: '4px 8px',
   },
+  listTitleRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
   listTitle: {
     fontSize: '12px',
     fontWeight: '700',
     color: 'var(--color-text-muted)',
     textTransform: 'uppercase',
+  },
+  projectCount: {
+    fontSize: '12px',
+    fontWeight: '600',
+    color: 'var(--color-text-main)',
+    textTransform: 'none',
   },
   sortContainer: {
     display: 'flex',
@@ -1416,9 +1622,110 @@ const styles = {
     alignItems: 'flex-start',
     borderBottom: '1px solid var(--border-divider)',
     paddingBottom: '16px',
-    marginBottom: '20px',
+    marginBottom: '12px',
     flexWrap: 'wrap',
     gap: '12px',
+  },
+  iconBtnAccent: {
+    background: 'none',
+    border: 'none',
+    color: 'var(--color-accent)',
+    cursor: 'pointer',
+    fontSize: '14px',
+    padding: '4px 6px',
+    borderRadius: '4px',
+    lineHeight: 1,
+  },
+  iconBtnDanger: {
+    background: 'none',
+    border: 'none',
+    color: '#fb7185',
+    cursor: 'pointer',
+    fontSize: '14px',
+    padding: '4px 6px',
+    borderRadius: '4px',
+    lineHeight: 1,
+  },
+  hoursProgressSection: {
+    marginBottom: '20px',
+    paddingBottom: '16px',
+    borderBottom: '1px solid var(--border-divider)',
+  },
+  hoursProgressHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '8px',
+    flexWrap: 'wrap',
+    gap: '6px',
+  },
+  hoursProgressTitle: {
+    fontSize: '12px',
+    fontWeight: '700',
+    color: 'var(--color-text-main)',
+  },
+  hoursProgressSummary: {
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
+  },
+  hoursProgressBar: {
+    display: 'flex',
+    height: '10px',
+    borderRadius: '6px',
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  hoursBarSegment: {
+    height: '100%',
+    transition: 'width 0.3s ease',
+    minWidth: 0,
+  },
+  hoursProgressLegend: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '12px',
+    marginTop: '8px',
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
+  },
+  legendItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+  },
+  legendDot: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    flexShrink: 0,
+  },
+  milestonesSectionHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '12px',
+    gap: '12px',
+  },
+  collapseAllBtn: {
+    background: 'none',
+    border: '1px solid var(--border-card)',
+    borderRadius: '6px',
+    color: 'var(--color-text-muted)',
+    cursor: 'pointer',
+    fontSize: '11px',
+    fontWeight: '600',
+    padding: '4px 10px',
+    whiteSpace: 'nowrap',
+  },
+  collapseToggleBtn: {
+    background: 'none',
+    border: 'none',
+    color: 'var(--color-text-muted)',
+    cursor: 'pointer',
+    fontSize: '12px',
+    padding: '2px 4px',
+    lineHeight: 1,
+    flexShrink: 0,
   },
   detailTitle: {
     fontSize: '20px',

@@ -5,6 +5,7 @@ import WeeklyCalendar from './components/WeeklyCalendar';
 import SkillsManager from './components/SkillsManager';
 import ProjectsManager from './components/ProjectsManager';
 import GoalBuilderChat from './components/GoalBuilderChat';
+import ReflectionAgentChat from './components/ReflectionAgentChat';
 import AnalyticsSummary from './components/AnalyticsSummary';
 import { approveWeeklySchedule, rejectWeeklySchedule } from './scheduleApi';
 
@@ -51,6 +52,12 @@ export default function App() {
           };
           if (isFirstLoad.current) {
             nextState.activeTab = 'schedule';
+          }
+          if (profile.builder_messages?.length) {
+            nextState.builderMessages = profile.builder_messages;
+          }
+          if (profile.builder_archived_conversations?.length) {
+            nextState.builderArchivedConversations = profile.builder_archived_conversations;
           }
           setState(nextState);
         } else {
@@ -346,6 +353,7 @@ export default function App() {
             {state.activeTab === 'skills' && <SkillsManager />}
             {state.activeTab === 'projects' && <ProjectsManager />}
             {state.activeTab === 'builder' && <GoalBuilderChat />}
+            {state.activeTab === 'reflection' && <ReflectionAgentChat />}
             {state.activeTab === 'summary' && <AnalyticsSummary />}
             {state.activeTab === 'audit' && (
               <div style={{ width: '100%', maxWidth: '900px', margin: '0 auto' }}>

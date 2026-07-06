@@ -56,7 +56,6 @@ export default function OnboardingWizard() {
   });
 
   // Add Calendar form state
-  const [newCalName, setNewCalName] = useState('');
   const [newCalType, setNewCalType] = useState('google');
   const [newCalUrl, setNewCalUrl] = useState('');
   const [isWriteDest, setIsWriteDest] = useState(false);
@@ -172,7 +171,6 @@ export default function OnboardingWizard() {
 
   const handleAddCalendar = async (e) => {
     e.preventDefault();
-    if (!newCalName.trim()) return;
 
     if (newCalType === 'google') {
       try {
@@ -190,10 +188,27 @@ export default function OnboardingWizard() {
       alert("Google OAuth2 Client ID/Secret not configured in environment. Adding calendar in local Developer Mode (falls back to local gcloud credentials).");
     }
 
+    let dynamicName = 'Google Calendar';
+    if (newCalType === 'ical') {
+      try {
+        const urlObj = new URL(newCalUrl);
+        const pathname = urlObj.pathname;
+        const parts = pathname.split('/');
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.endsWith('.ics')) {
+          dynamicName = lastPart.replace('.ics', '') + ' Feed';
+        } else {
+          dynamicName = urlObj.hostname + ' Feed';
+        }
+      } catch (e) {
+        dynamicName = 'iCal Feed';
+      }
+    }
+
     const newId = `cal-${Math.random().toString(36).substring(2, 8)}`;
     const newCal = {
       id: newId,
-      name: newCalName,
+      name: dynamicName,
       type: newCalType,
       url: newCalType === 'ical' ? newCalUrl : '',
       selected: true,
@@ -212,7 +227,6 @@ export default function OnboardingWizard() {
     setLocalCalendars(updated);
 
     // Reset inputs
-    setNewCalName('');
     setNewCalUrl('');
     setIsWriteDest(false);
   };
@@ -249,6 +263,18 @@ export default function OnboardingWizard() {
 
   // Submit preferences (either onboarding finalize or settings save)
   const handleSavePreferences = async (isWizard = false) => {
+    // Validation checks
+    if (localCalendars.length === 0) {
+      alert("Please connect at least one calendar before proceeding.");
+      return;
+    }
+
+    const hasSelectedGoogle = localCalendars.some(c => c.selected && c.type === 'google');
+    if (!hasSelectedGoogle) {
+      alert("You must connect and select at least one Google Calendar. iCal subscriptions are read-only feeds, and the system requires a Google Calendar to schedule and write your upskilling sessions.");
+      return;
+    }
+
     setIsSaving(true);
     setSaveSuccess(false);
 
@@ -256,7 +282,12 @@ export default function OnboardingWizard() {
     const hasWrite = localCalendars.some(c => c.role === 'write');
     let finalizedCalendars = [...localCalendars];
     if (!hasWrite && finalizedCalendars.length > 0) {
-      finalizedCalendars[0].role = 'write';
+      const firstGoogle = finalizedCalendars.find(c => c.selected && c.type === 'google');
+      if (firstGoogle) {
+        firstGoogle.role = 'write';
+      } else {
+        finalizedCalendars[0].role = 'write';
+      }
     }
 
     const payload = {
@@ -410,7 +441,14 @@ export default function OnboardingWizard() {
                 {state.availableGoogleCalendars.map(cal => {
                   const isSelected = selectedImportIds.includes(cal.id);
                   return (
-                    <label key={cal.id} style={styles.importItem}>
+                    <label 
+                      key={cal.id} 
+                      style={{
+                        ...styles.importItem,
+                        backgroundColor: isSelected ? 'rgba(99, 102, 241, 0.1)' : 'rgba(15, 23, 42, 0.2)',
+                        borderColor: isSelected ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-divider)',
+                      }}
+                    >
                       <input
                         type="checkbox"
                         checked={isSelected}
@@ -433,96 +471,138 @@ export default function OnboardingWizard() {
           )}
 
           <div style={styles.calList}>
-            {localCalendars.map(cal => (
-              <div key={cal.id} style={styles.calendarCard}>
-                <div style={styles.calendarRow}>
-                  <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <input
-                      type="checkbox"
-                      checked={cal.selected}
-                      onChange={() => handleToggleCalendarSelected(cal.id)}
-                      style={styles.checkboxInline}
-                    />
-                    <div>
-                      <span style={styles.calendarName}>{cal.name}</span>
-                      <span style={styles.providerBadge}>{cal.type.toUpperCase()}</span>
+            {localCalendars.map(cal => {
+              const isWrite = cal.role === 'write';
+              return (
+                <div 
+                  key={cal.id} 
+                  style={{
+                    ...styles.calendarCard,
+                    borderColor: isWrite ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-card)',
+                    boxShadow: isWrite ? '0 0 14px rgba(99, 102, 241, 0.15)' : 'none',
+                    background: isWrite ? 'rgba(99, 102, 241, 0.04)' : 'rgba(30, 41, 59, 0.25)',
+                  }}
+                >
+                  <div style={styles.calendarRow}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <input
+                        type="checkbox"
+                        checked={cal.selected}
+                        onChange={() => handleToggleCalendarSelected(cal.id)}
+                        style={styles.checkboxInline}
+                      />
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={styles.calendarName}>{cal.name}</span>
+                          <span style={{
+                            ...styles.providerBadge,
+                            backgroundColor: cal.type === 'google' ? 'rgba(66, 133, 244, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+                            color: cal.type === 'google' ? '#4285f4' : 'var(--color-success)',
+                          }}>
+                            {cal.type.toUpperCase()}
+                          </span>
+                        </div>
+                        {cal.type === 'ical' && cal.url && (
+                          <div style={styles.icalUrlText}>{cal.url}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div style={styles.calCardActions}>
+                      {isWrite ? (
+                        <span style={styles.writeLabel}>✍️ Write Destination</span>
+                      ) : cal.type === 'ical' ? (
+                        <span style={styles.readOnlyLabel}>🚫 Read-Only Feed</span>
+                      ) : (
+                        <button
+                          onClick={() => handleSetWriteDestination(cal.id)}
+                          style={styles.setWriteBtn}
+                        >
+                          Set as Write Destination
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleRemoveCalendar(cal.id)}
+                        style={styles.removeBtn}
+                      >
+                        Remove
+                      </button>
                     </div>
                   </div>
-                  <div style={styles.calCardActions}>
-                    {cal.role === 'write' ? (
-                      <span style={styles.writeLabel}>✍️ Write Destination</span>
-                    ) : cal.type === 'ical' ? (
-                      <span style={styles.readOnlyLabel}>🚫 Read-Only Feed</span>
-                    ) : (
-                      <button
-                        onClick={() => handleSetWriteDestination(cal.id)}
-                        style={styles.setWriteBtn}
-                      >
-                        Set as Write Destination
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleRemoveCalendar(cal.id)}
-                      style={styles.removeBtn}
-                    >
-                      Remove
-                    </button>
-                  </div>
                 </div>
-                {cal.type === 'ical' && cal.url && (
-                  <div style={styles.icalUrlText}>{cal.url}</div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Add Calendar Form */}
           <form onSubmit={handleAddCalendar} style={styles.addCalForm}>
-            <h4 style={{ ...styles.label, margin: '0 0 10px 0' }}>Connect New Calendar</h4>
-            <div style={styles.addCalGrid}>
-              <input
-                type="text"
-                value={newCalName}
-                onChange={(e) => setNewCalName(e.target.value)}
-                placeholder="Calendar Name (e.g. Personal Feed)"
-                style={styles.textInputSmall}
-                required
-              />
-              <select
-                value={newCalType}
-                onChange={(e) => setNewCalType(e.target.value)}
-                style={styles.inlineSelect}
+            <h4 style={{ ...styles.label, margin: '0 0 14px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--color-accent)' }}>Connect New Calendar</h4>
+            
+            <div style={styles.providerToggleContainer}>
+              <button
+                type="button"
+                onClick={() => setNewCalType('google')}
+                style={{
+                  ...styles.providerToggleButton,
+                  ...(newCalType === 'google' ? styles.providerToggleButtonActive : {})
+                }}
               >
-                <option value="google">Google Calendar</option>
-                <option value="ical">iCal URL (.ics)</option>
-              </select>
+                <span style={styles.providerIcon}>🌐</span>
+                <span style={styles.providerLabel}>Google Calendar</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewCalType('ical')}
+                style={{
+                  ...styles.providerToggleButton,
+                  ...(newCalType === 'ical' ? styles.providerToggleButtonActive : {})
+                }}
+              >
+                <span style={styles.providerIcon}>📅</span>
+                <span style={styles.providerLabel}>iCal Subscription URL</span>
+              </button>
             </div>
 
-            {newCalType === 'ical' && (
-              <input
-                type="url"
-                value={newCalUrl}
-                onChange={(e) => setNewCalUrl(e.target.value)}
-                placeholder="iCal Subscription URL (https://...ics)"
-                style={{ ...styles.textInputSmall, marginTop: '8px' }}
-                required
-              />
+            {newCalType === 'google' ? (
+              <div style={styles.googleInfoBox}>
+                ℹ️ Authenticate with your Google account to retrieve and select your Google Calendars. Supports both read and write access.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%' }}>
+                <div style={{ ...styles.googleInfoBox, backgroundColor: 'rgba(251, 191, 36, 0.04)', borderColor: 'rgba(251, 191, 36, 0.2)', color: 'var(--color-warning)' }}>
+                  ⚠️ iCal subscriptions are read-only feeds. The planner checks these for conflicts but cannot write events to them.
+                </div>
+                <input
+                  type="url"
+                  value={newCalUrl}
+                  onChange={(e) => setNewCalUrl(e.target.value)}
+                  placeholder="iCal Subscription URL (https://example.com/calendar.ics)"
+                  style={styles.textInputSmall}
+                  required
+                />
+              </div>
             )}
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px' }}>
-              <input
-                type="checkbox"
-                id="isWriteDest"
-                checked={isWriteDest}
-                onChange={(e) => setIsWriteDest(e.target.checked)}
-                style={styles.checkbox}
-              />
-              <label htmlFor="isWriteDest" style={{ fontSize: '11px', color: 'var(--color-text-main)', cursor: 'pointer' }}>
-                Designate as Write Destination
-              </label>
-            </div>
+            {newCalType !== 'ical' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '14px', marginBottom: '4px' }}>
+                <input
+                  type="checkbox"
+                  id="isWriteDest"
+                  checked={isWriteDest}
+                  onChange={(e) => setIsWriteDest(e.target.checked)}
+                  style={styles.checkbox}
+                />
+                <label htmlFor="isWriteDest" style={{ fontSize: '12px', color: 'var(--color-text-main)', cursor: 'pointer', fontWeight: '500' }}>
+                  Designate as Write Destination
+                </label>
+              </div>
+            )}
 
-            <button type="submit" style={styles.addCalBtn}>Connect Calendar</button>
+            <button 
+              type="submit" 
+              style={styles.addCalBtn}
+            >
+              {newCalType === 'google' ? '🔗 Connect Google Calendar' : '🔗 Connect iCal Feed'}
+            </button>
           </form>
         </div>
 
@@ -636,7 +716,14 @@ export default function OnboardingWizard() {
                 {state.availableGoogleCalendars.map(cal => {
                   const isSelected = selectedImportIds.includes(cal.id);
                   return (
-                    <label key={cal.id} style={styles.importItem}>
+                    <label 
+                      key={cal.id} 
+                      style={{
+                        ...styles.importItem,
+                        backgroundColor: isSelected ? 'rgba(99, 102, 241, 0.1)' : 'rgba(15, 23, 42, 0.2)',
+                        borderColor: isSelected ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-divider)',
+                      }}
+                    >
                       <input
                         type="checkbox"
                         checked={isSelected}
@@ -662,97 +749,139 @@ export default function OnboardingWizard() {
             {localCalendars.length === 0 ? (
               <div style={styles.emptyCalText}>No calendars connected yet. Use the form below to connect your first calendar!</div>
             ) : (
-              localCalendars.map(cal => (
-                <div key={cal.id} style={styles.calendarCard}>
-                  <div style={styles.calendarRow}>
-                    <div style={{ display: 'flex', alignItems: 'center' }}>
-                      <input
-                        type="checkbox"
-                        checked={cal.selected}
-                        onChange={() => handleToggleCalendarSelected(cal.id)}
-                        style={styles.checkboxInline}
-                      />
-                      <div>
-                        <span style={styles.calendarName}>{cal.name}</span>
-                        <span style={styles.providerBadge}>{cal.type.toUpperCase()}</span>
+              localCalendars.map(cal => {
+                const isWrite = cal.role === 'write';
+                return (
+                  <div 
+                    key={cal.id} 
+                    style={{
+                      ...styles.calendarCard,
+                      borderColor: isWrite ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-card)',
+                      boxShadow: isWrite ? '0 0 14px rgba(99, 102, 241, 0.15)' : 'none',
+                      background: isWrite ? 'rgba(99, 102, 241, 0.04)' : 'rgba(30, 41, 59, 0.25)',
+                    }}
+                  >
+                    <div style={styles.calendarRow}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <input
+                          type="checkbox"
+                          checked={cal.selected}
+                          onChange={() => handleToggleCalendarSelected(cal.id)}
+                          style={styles.checkboxInline}
+                        />
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={styles.calendarName}>{cal.name}</span>
+                            <span style={{
+                              ...styles.providerBadge,
+                              backgroundColor: cal.type === 'google' ? 'rgba(66, 133, 244, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+                              color: cal.type === 'google' ? '#4285f4' : 'var(--color-success)',
+                            }}>
+                              {cal.type.toUpperCase()}
+                            </span>
+                          </div>
+                          {cal.type === 'ical' && cal.url && (
+                            <div style={styles.icalUrlText}>{cal.url}</div>
+                          )}
+                        </div>
+                      </div>
+                      <div style={styles.calCardActions}>
+                        {isWrite ? (
+                          <span style={styles.writeLabel}>✍️ Write Destination</span>
+                        ) : cal.type === 'ical' ? (
+                          <span style={styles.readOnlyLabel}>🚫 Read-Only Feed</span>
+                        ) : (
+                          <button
+                            onClick={() => handleSetWriteDestination(cal.id)}
+                            style={styles.setWriteBtn}
+                          >
+                            Set as Write Destination
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleRemoveCalendar(cal.id)}
+                          style={styles.removeBtn}
+                        >
+                          Remove
+                        </button>
                       </div>
                     </div>
-                    <div style={styles.calCardActions}>
-                      {cal.role === 'write' ? (
-                        <span style={styles.writeLabel}>✍️ Write Destination</span>
-                      ) : cal.type === 'ical' ? (
-                        <span style={styles.readOnlyLabel}>🚫 Read-Only Feed</span>
-                      ) : (
-                        <button
-                          onClick={() => handleSetWriteDestination(cal.id)}
-                          style={styles.setWriteBtn}
-                        >
-                          Set as Write Destination
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleRemoveCalendar(cal.id)}
-                        style={styles.removeBtn}
-                      >
-                        Remove
-                      </button>
-                    </div>
                   </div>
-                  {cal.type === 'ical' && cal.url && (
-                    <div style={styles.icalUrlText}>{cal.url}</div>
-                  )}
-                </div>
-              ))
+                );
+              })
             )}
           </div>
 
           {/* Add Calendar Form */}
           <form onSubmit={handleAddCalendar} style={styles.addCalForm}>
-            <h4 style={{ ...styles.label, margin: '0 0 10px 0' }}>Connect New Calendar</h4>
-            <div style={styles.addCalGrid}>
-              <input
-                type="text"
-                value={newCalName}
-                onChange={(e) => setNewCalName(e.target.value)}
-                placeholder="Calendar Name (e.g. Work Events)"
-                style={styles.textInputSmall}
-                required
-              />
-              <select
-                value={newCalType}
-                onChange={(e) => setNewCalType(e.target.value)}
-                style={styles.inlineSelect}
+            <h4 style={{ ...styles.label, margin: '0 0 14px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--color-accent)' }}>Connect New Calendar</h4>
+            
+            <div style={styles.providerToggleContainer}>
+              <button
+                type="button"
+                onClick={() => setNewCalType('google')}
+                style={{
+                  ...styles.providerToggleButton,
+                  ...(newCalType === 'google' ? styles.providerToggleButtonActive : {})
+                }}
               >
-                <option value="google">Google Calendar</option>
-                <option value="ical">iCal URL (.ics)</option>
-              </select>
+                <span style={styles.providerIcon}>🌐</span>
+                <span style={styles.providerLabel}>Google Calendar</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewCalType('ical')}
+                style={{
+                  ...styles.providerToggleButton,
+                  ...(newCalType === 'ical' ? styles.providerToggleButtonActive : {})
+                }}
+              >
+                <span style={styles.providerIcon}>📅</span>
+                <span style={styles.providerLabel}>iCal Subscription URL</span>
+              </button>
             </div>
 
-            {newCalType === 'ical' && (
-              <input
-                type="url"
-                value={newCalUrl}
-                onChange={(e) => setNewCalUrl(e.target.value)}
-                placeholder="iCal URL (https://...ics)"
-                style={{ ...styles.textInputSmall, marginTop: '8px' }}
-                required
-              />
+            {newCalType === 'google' ? (
+              <div style={styles.googleInfoBox}>
+                ℹ️ Authenticate with your Google account to retrieve and select your Google Calendars. Supports both read and write access.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%' }}>
+                <div style={{ ...styles.googleInfoBox, backgroundColor: 'rgba(251, 191, 36, 0.04)', borderColor: 'rgba(251, 191, 36, 0.2)', color: 'var(--color-warning)' }}>
+                  ⚠️ iCal subscriptions are read-only feeds. The planner checks these for conflicts but cannot write events to them.
+                </div>
+                <input
+                  type="url"
+                  value={newCalUrl}
+                  onChange={(e) => setNewCalUrl(e.target.value)}
+                  placeholder="iCal URL (https://example.com/calendar.ics)"
+                  style={styles.textInputSmall}
+                  required
+                />
+              </div>
             )}
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px' }}>
-              <input
-                type="checkbox"
-                id="isWriteDestWizard"
-                checked={isWriteDest}
-                onChange={(e) => setIsWriteDest(e.target.checked)}
-                style={styles.checkbox}
-              />
-              <label htmlFor="isWriteDestWizard" style={{ fontSize: '11px', color: 'var(--color-text-main)', cursor: 'pointer' }}>
-                Designate as Write Destination
-              </label>
-            </div>
+            {newCalType !== 'ical' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '14px', marginBottom: '4px' }}>
+                <input
+                  type="checkbox"
+                  id="isWriteDestWizard"
+                  checked={isWriteDest}
+                  onChange={(e) => setIsWriteDest(e.target.checked)}
+                  style={styles.checkbox}
+                />
+                <label htmlFor="isWriteDestWizard" style={{ fontSize: '12px', color: 'var(--color-text-main)', cursor: 'pointer', fontWeight: '500' }}>
+                  Designate as Write Destination
+                </label>
+              </div>
+            )}
 
-            <button type="submit" style={styles.addCalBtn}>Connect Calendar</button>
+            <button 
+              type="submit" 
+              style={styles.addCalBtn}
+            >
+              {newCalType === 'google' ? '🔗 Connect Google Calendar' : '🔗 Connect iCal Feed'}
+            </button>
           </form>
 
           <div style={styles.buttonGroup}>
@@ -762,7 +891,7 @@ export default function OnboardingWizard() {
             <button
               onClick={() => handleSavePreferences(true)}
               style={styles.primaryButton}
-              disabled={isSaving || localCalendars.length === 0}
+              disabled={isSaving}
             >
               {isSaving ? 'Saving preferences...' : 'Finalize & Continue to Goal Builder'}
             </button>
@@ -856,14 +985,15 @@ const styles = {
     outline: 'none',
   },
   textInputSmall: {
-    flex: 1,
-    backgroundColor: 'var(--bg-main)',
+    backgroundColor: 'var(--input-bg)',
     border: '1px solid var(--input-border)',
-    borderRadius: '6px',
-    padding: '8px 12px',
-    fontSize: '12px',
+    borderRadius: '8px',
+    padding: '12px 16px',
+    fontSize: '13px',
     color: 'var(--color-text-main)',
     outline: 'none',
+    width: '100%',
+    transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
   },
   selectInput: {
     width: '100%',
@@ -936,10 +1066,11 @@ const styles = {
     marginBottom: '20px',
   },
   calendarCard: {
-    backgroundColor: 'var(--bg-main)',
+    backgroundColor: 'rgba(30, 41, 59, 0.25)',
     border: '1px solid var(--border-card)',
-    borderRadius: '8px',
-    padding: '12px 16px',
+    borderRadius: '12px',
+    padding: '16px',
+    transition: 'all 0.2s ease',
   },
   calendarRow: {
     display: 'flex',
@@ -947,17 +1078,14 @@ const styles = {
     alignItems: 'center',
   },
   calendarName: {
-    fontSize: '13px',
+    fontSize: '14px',
     fontWeight: '600',
     color: 'var(--color-text-main)',
   },
   providerBadge: {
     fontSize: '9px',
-    backgroundColor: 'var(--bg-sidebar)',
-    color: 'var(--color-text-muted)',
     padding: '2px 6px',
     borderRadius: '4px',
-    marginLeft: '8px',
     fontWeight: '700',
   },
   calCardActions: {
@@ -977,11 +1105,12 @@ const styles = {
     backgroundColor: 'transparent',
     border: '1px solid var(--color-accent)',
     color: 'var(--color-accent)',
-    fontSize: '10px',
-    padding: '4px 8px',
+    fontSize: '11px',
+    padding: '6px 12px',
     borderRadius: '6px',
     cursor: 'pointer',
     fontWeight: '600',
+    transition: 'all 0.15s ease',
   },
   removeBtn: {
     backgroundColor: 'transparent',
@@ -990,23 +1119,28 @@ const styles = {
     fontSize: '11px',
     cursor: 'pointer',
     fontWeight: '600',
+    padding: '6px 12px',
   },
   icalUrlText: {
     fontSize: '10px',
     color: 'var(--color-text-muted)',
-    marginTop: '6px',
+    marginTop: '4px',
     fontFamily: 'monospace',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    maxWidth: '300px',
   },
   addCalForm: {
-    backgroundColor: 'var(--bg-sidebar)',
+    backgroundColor: 'rgba(30, 41, 59, 0.35)',
     border: '1px solid var(--border-divider)',
-    borderRadius: '10px',
-    padding: '16px',
-    marginTop: '16px',
-    marginBottom: '16px',
+    borderRadius: '14px',
+    padding: '20px',
+    marginTop: '20px',
+    marginBottom: '20px',
+    boxShadow: 'var(--shadow-main)',
+    display: 'flex',
+    flexDirection: 'column',
   },
   addCalGrid: {
     display: 'flex',
@@ -1022,22 +1156,68 @@ const styles = {
     outline: 'none',
   },
   checkbox: {
-    width: '14px',
-    height: '14px',
+    width: '15px',
+    height: '15px',
     cursor: 'pointer',
     accentColor: 'var(--color-accent)',
   },
   addCalBtn: {
-    backgroundColor: 'var(--bg-main)',
-    color: 'var(--color-text-main)',
-    border: '1px solid var(--input-border)',
+    backgroundColor: 'var(--color-accent)',
+    color: '#ffffff',
+    border: 'none',
     borderRadius: '6px',
     padding: '8px 16px',
-    fontSize: '11px',
+    fontSize: '12px',
     fontWeight: '600',
     cursor: 'pointer',
-    marginTop: '12px',
-    width: '100%',
+    marginTop: '16px',
+    width: 'auto',
+    alignSelf: 'flex-start',
+    transition: 'background-color 0.2s ease, opacity 0.2s ease, transform 0.1s ease',
+  },
+  providerToggleContainer: {
+    display: 'flex',
+    gap: '12px',
+    marginBottom: '16px',
+  },
+  providerToggleButton: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    padding: '12px 8px',
+    backgroundColor: 'rgba(15, 23, 42, 0.4)',
+    border: '1px solid var(--input-border)',
+    borderRadius: '10px',
+    cursor: 'pointer',
+    color: 'var(--color-text-muted)',
+    transition: 'all 0.2s ease',
+    outline: 'none',
+  },
+  providerToggleButtonActive: {
+    backgroundColor: 'rgba(99, 102, 241, 0.12)',
+    borderColor: 'var(--color-accent)',
+    color: 'var(--color-text-main)',
+    boxShadow: '0 0 8px rgba(99, 102, 241, 0.15)',
+  },
+  providerIcon: {
+    fontSize: '20px',
+  },
+  providerLabel: {
+    fontSize: '11px',
+    fontWeight: '600',
+  },
+  googleInfoBox: {
+    backgroundColor: 'rgba(99, 102, 241, 0.04)',
+    border: '1px solid rgba(99, 102, 241, 0.15)',
+    borderRadius: '8px',
+    padding: '12px',
+    marginBottom: '12px',
+    fontSize: '11px',
+    color: 'var(--color-text-muted)',
+    lineHeight: '1.4',
   },
   emptyCalText: {
     fontSize: '12px',

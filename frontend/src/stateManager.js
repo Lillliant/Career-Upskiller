@@ -43,6 +43,7 @@ class AppStateStore {
       builderMessages: [
         { role: 'model', text: "Hello! I am your Skill Concierge assistant. Let's discuss your career aspirations and design high-impact learning goals and weekly projects to get you there." }
       ],
+      builderArchivedConversations: [],
       
       // Reflection / Work logs
       logs: []

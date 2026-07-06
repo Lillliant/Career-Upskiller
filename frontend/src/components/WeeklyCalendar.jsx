@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAppState, appState } from '../stateManager';
-import { stageWeeklySchedule } from '../scheduleApi';
+import { stageWeeklySchedule, clearDayLearningEvents } from '../scheduleApi';
 
 /** Format a Date as ISO 8601 with the app's fixed -04:00 offset. */
 function toLocalOffsetISO(date) {
@@ -381,6 +381,48 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     }
   };
 
+  const reloadCalendarEvents = async () => {
+    try {
+      const res = await fetch(`/api/calendar/events?offset=${state.currentWeekOffset}`);
+      if (res.ok) {
+        const events = await res.json();
+        setState({ calendarEvents: events });
+      }
+    } catch (err) {
+      console.error('Failed to reload calendar events:', err);
+    }
+  };
+
+  const handleClearDay = async (day) => {
+    const dayEvents = getEventsForDay(day.dateStr);
+    const managedCount = dayEvents.filter((evt) => evt.type === 'learning' || evt.isProposed).length;
+
+    if (managedCount === 0) {
+      alert(`No managed learning blocks on ${day.dayName}.`);
+      return;
+    }
+
+    if (!window.confirm(
+      `Clear ${managedCount} managed learning block${managedCount === 1 ? '' : 's'} on ${day.dayName} ${day.dateNum}?\n\nThis removes them from Google Calendar and local state. Orphaned learning events on Google Calendar are not affected.`
+    )) {
+      return;
+    }
+
+    try {
+      const result = await clearDayLearningEvents(day.dateStr);
+      const cleared = result.removed_from_state ?? result.deleted_count ?? 0;
+      setState({
+        proposedEvents: state.proposedEvents.filter((evt) => !evt.start?.startsWith(day.dateStr)),
+        scheduledEvents: (state.scheduledEvents || []).filter((evt) => !evt.start?.startsWith(day.dateStr)),
+      });
+      await reloadCalendarEvents();
+      alert(`Cleared ${cleared} learning block${cleared === 1 ? '' : 's'} from ${day.dayName}.`);
+    } catch (err) {
+      console.error('Failed to clear day:', err);
+      alert(err.message || 'Failed to clear learning blocks for this day.');
+    }
+  };
+
   // Formatted date string for week title
   const startOfWeekStr = weekDays[0].fullDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const endOfWeekStr = weekDays[6].fullDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -459,6 +501,14 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
             <div key={day.dateStr} style={styles.dayHeaderCell}>
               <span style={styles.dayName}>{day.dayName}</span>
               <span style={styles.dayNum}>{day.dateNum}</span>
+              <button
+                type="button"
+                onClick={() => handleClearDay(day)}
+                style={styles.clearDayBtn}
+                title={`Clear managed learning blocks on ${day.dayName}`}
+              >
+                Clear
+              </button>
             </div>
           ))}
         </div>
@@ -897,6 +947,19 @@ const styles = {
     fontWeight: '700',
     color: 'var(--color-text-main)',
     marginTop: '2px',
+  },
+  clearDayBtn: {
+    marginTop: '6px',
+    backgroundColor: 'transparent',
+    border: '1px solid var(--input-border)',
+    borderRadius: '4px',
+    color: 'var(--color-text-muted)',
+    fontSize: '9px',
+    fontWeight: '600',
+    padding: '2px 6px',
+    cursor: 'pointer',
+    textTransform: 'uppercase',
+    letterSpacing: '0.03em',
   },
   gridBody: {
     display: 'flex',

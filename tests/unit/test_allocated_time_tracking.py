@@ -1,7 +1,7 @@
 import datetime
 import pytest
 from app.state_store import update_tasks_allocated_time, pace_and_schedule_goals
-from app.orchestrator import parse_duration
+from app.scheduling_utils import parse_duration
 
 def test_update_tasks_allocated_time():
     profile = {

@@ -7,7 +7,15 @@ import uuid
 from typing import Any
 
 from app.mcp_clients import get_calendar_free_busy
-from app.scheduling_utils import find_task_due_date_for_event, generate_signature, parse_duration
+from app.scheduling_utils import (
+    event_displacement_key,
+    find_task_due_date_for_event,
+    generate_signature,
+    get_goal_priority,
+    get_sequential_schedulable_tasks,
+    parse_duration,
+    sort_tasks_for_scheduling,
+)
 from app.state_store import state_store, update_tasks_allocated_time
 
 
@@ -35,65 +43,37 @@ def build_weekly_schedule_proposal(profile: dict[str, Any] | None = None) -> dic
     start_minutes = sh * 60 + sm
     end_minutes = eh * 60 + em
     base_date = max(datetime.date.today(), datetime.date(2026, 7, 2))
+    week_end = base_date + datetime.timedelta(days=6)
     goals = profile.get("goals", [])
 
-    uncompleted_tasks = []
+    uncompleted_tasks = get_sequential_schedulable_tasks(
+        goals, week_start=base_date, week_end=week_end
+    )
+
+    # Include goals without sub_projects as fallback items due this week
     for g in goals:
-        if g.get("status") in ["to-do", "in-progress"]:
-            sub_projects = g.get("sub_projects", [])
-            if not sub_projects:
-                uncompleted_tasks.append({
-                    "task": {
-                        "title": g.get("title"),
-                        "description": g.get("description", f"Focused upskilling for goal '{g.get('title')}'."),
-                        "estimated_time": "1 hour",
-                        "dueDate": (base_date + datetime.timedelta(days=7)).isoformat(),
-                        "completed": False,
-                    },
-                    "milestone": {"title": "General"},
-                    "goal": g,
-                    "is_fallback": True,
-                })
-            else:
-                for m in sub_projects:
-                    tasks = m.get("tasks", [])
-                    if not tasks:
-                        if not m.get("completed"):
-                            uncompleted_tasks.append({
-                                "task": {
-                                    "title": m.get("title"),
-                                    "description": m.get("description", f"Milestone: {m.get('title')}"),
-                                    "estimated_time": "1 hour",
-                                    "dueDate": m.get("dueDate", (base_date + datetime.timedelta(days=7)).isoformat()),
-                                    "completed": False,
-                                },
-                                "milestone": m,
-                                "goal": g,
-                                "is_fallback": True,
-                            })
-                    else:
-                        for t in tasks:
-                            if not t.get("completed"):
-                                task_est = parse_duration(t.get("estimated_time"))
-                                task_allocated = t.get("allocated_time_mins", 0)
-                                if task_est - task_allocated > 0:
-                                    uncompleted_tasks.append({
-                                        "task": t,
-                                        "milestone": m,
-                                        "goal": g,
-                                        "is_fallback": False,
-                                    })
+        if g.get("status") not in ("to-do", "in-progress"):
+            continue
+        if g.get("sub_projects"):
+            continue
+        uncompleted_tasks.append({
+            "task": {
+                "title": g.get("title"),
+                "description": g.get("description", f"Focused upskilling for goal '{g.get('title')}'."),
+                "estimated_time": "1 hour",
+                "dueDate": week_end.isoformat(),
+                "completed": False,
+                "allocated_time_mins": 0,
+            },
+            "milestone": {"title": "General"},
+            "goal": g,
+            "goal_priority": get_goal_priority(g),
+            "milestone_idx": 0,
+            "task_idx": 0,
+            "is_fallback": True,
+        })
 
-    def get_task_due_date(item: dict[str, Any]) -> datetime.date:
-        d_str = item["task"].get("dueDate")
-        if d_str:
-            try:
-                return datetime.date.fromisoformat(d_str)
-            except ValueError:
-                pass
-        return datetime.date.max
-
-    uncompleted_tasks.sort(key=get_task_due_date)
+    uncompleted_tasks = sort_tasks_for_scheduling(uncompleted_tasks)
 
     proposed_blocks: list[dict[str, Any]] = []
     failed_days: list[str] = []
@@ -234,8 +214,26 @@ def build_weekly_schedule_proposal(profile: dict[str, Any] | None = None) -> dic
                         try:
                             due_date_other = datetime.date.fromisoformat(due_date_other_str)
                             due_date_curr = datetime.date.fromisoformat(task.get("dueDate", ""))
-                            if due_date_other > due_date_curr:
-                                candidates.append((due_date_other, evt))
+                            curr_priority = get_goal_priority(goal)
+                            other_priority = 1
+                            summary = evt.get("summary", "")
+                            other_goal_title = ""
+                            if " - " in summary:
+                                parts = summary.split(" - ", 1)
+                                other_goal_title = (
+                                    parts[0][len("Learning: "):].strip()
+                                    if parts[0].startswith("Learning: ")
+                                    else parts[0].strip()
+                                )
+                            for g in goals:
+                                if g.get("title") == other_goal_title:
+                                    other_priority = get_goal_priority(g)
+                                    break
+                            if (
+                                due_date_other > due_date_curr
+                                or (due_date_other == due_date_curr and other_priority < curr_priority)
+                            ):
+                                candidates.append((event_displacement_key(evt, goals), evt))
                         except Exception:
                             pass
 
@@ -281,6 +279,9 @@ def build_weekly_schedule_proposal(profile: dict[str, Any] | None = None) -> dic
                                             "task": t,
                                             "milestone": m,
                                             "goal": g,
+                                            "goal_priority": get_goal_priority(g),
+                                            "milestone_idx": g.get("sub_projects", []).index(m),
+                                            "task_idx": m.get("tasks", []).index(t),
                                             "is_fallback": False,
                                         }
                                         break
@@ -303,7 +304,7 @@ def build_weekly_schedule_proposal(profile: dict[str, Any] | None = None) -> dic
 
                 if found_task_item:
                     uncompleted_tasks.append(found_task_item)
-                    uncompleted_tasks[task_idx:] = sorted(uncompleted_tasks[task_idx:], key=get_task_due_date)
+                    uncompleted_tasks[task_idx:] = sort_tasks_for_scheduling(uncompleted_tasks[task_idx:])
 
                 for current_target in range(target_slots_needed, 1, -1):
                     actual_duration = current_target * 15
