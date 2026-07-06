@@ -260,16 +260,15 @@ export default function OnboardingWizard() {
     }
 
     const payload = {
-      career_goals: goals,
       hours_per_week: hours,
       preferred_start_time: startTime,
       preferred_end_time: endTime,
       study_days: localStudyDays,
-      target_calendars: finalizedCalendars
+      target_calendars: finalizedCalendars,
+      onboarded: true
     };
 
     const updatedState = {
-      careerGoals: goals,
       hoursPerWeek: hours,
       preferredStartTime: startTime,
       preferredEndTime: endTime,
@@ -279,23 +278,7 @@ export default function OnboardingWizard() {
     };
 
     if (isWizard) {
-      const newGoal = {
-        title: firstProject,
-        description: `Kickstart project for ${goals}`,
-        status: 'in-progress',
-        time_spent_mins: 0,
-        sub_projects: [
-          { title: "Review market insights", completed: true, dueDate: "2026-07-03" },
-          { title: "Define workflow edges", completed: false, dueDate: "2026-07-05" },
-          { title: "Confirm Zero-Trust calendar write", completed: false, dueDate: "2026-07-08" }
-        ],
-        skills: [
-          { name: goals, category: "Core Development", career_application: "Specialist" }
-        ],
-        conversations: []
-      };
-      updatedState.goals = [newGoal];
-      updatedState.activeTab = 'schedule';
+      updatedState.activeTab = 'builder';
     }
 
     // Live Mode
@@ -307,50 +290,13 @@ export default function OnboardingWizard() {
       });
       if (!resProfile.ok) throw new Error("Failed to save profile on backend.");
 
-      if (isWizard) {
-        const firstGoalData = {
-          title: firstProject,
-          description: `Kickstart project for ${goals}`,
-          status: 'in-progress',
-          sub_projects: [
-            { title: "Review market insights", completed: true, dueDate: "2026-07-03" },
-            { title: "Define workflow edges", completed: false, dueDate: "2026-07-05" },
-            { title: "Confirm Zero-Trust calendar write", completed: false, dueDate: "2026-07-08" }
-          ],
-          skills: [
-            { name: goals, category: "Core Development", career_application: "Specialist" }
-          ]
-        };
-
-        const resGoal = await fetch('/api/goals', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(firstGoalData)
-        });
-        if (!resGoal.ok) throw new Error("Failed to create first goal on backend.");
-
-        // Run scheduler
-        await fetch('/run', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            app_name: 'app',
-            user_id: 'test_user_123',
-            session_id: 'active_session_123',
-            new_message: {
-              role: 'user',
-              parts: [{ text: "Initialize schedule." }]
-            }
-          })
-        });
-      }
-
       // Fetch refreshed state
       const resProfileGet = await fetch('/api/profile');
       if (resProfileGet.ok) {
         const profile = await resProfileGet.json();
         setState({
           ...updatedState,
+          careerGoals: profile.career_goals || '',
           proposedEvents: profile.proposed_events || [],
           scarcityFlag: profile.scarcity_flag || false,
           reason: profile.reason || '',
@@ -597,58 +543,11 @@ export default function OnboardingWizard() {
       <div style={styles.statusBar}>
         <div style={{ ...styles.stepIndicator, backgroundColor: step >= 1 ? 'var(--color-accent)' : 'var(--input-border)' }}></div>
         <div style={{ ...styles.stepIndicator, backgroundColor: step >= 2 ? 'var(--color-accent)' : 'var(--input-border)' }}></div>
-        <div style={{ ...styles.stepIndicator, backgroundColor: step >= 3 ? 'var(--color-accent)' : 'var(--input-border)' }}></div>
       </div>
 
       {step === 1 && (
         <div>
-          <h2 style={styles.title}>1. Skill Goals & Project Draft 🎯</h2>
-          <p style={styles.subtitle}>Specify the career direction and outline your first concrete learning project.</p>
-
-          <div style={styles.formGroup}>
-            <label style={styles.label}>What is your target career upskilling goal?</label>
-            <input
-              type="text"
-              value={goals}
-              onChange={(e) => setGoals(e.target.value)}
-              style={styles.textInput}
-              placeholder="e.g. AI Engineering, Cloud Architecture"
-              required
-            />
-          </div>
-
-          <div style={styles.formGroup}>
-            <label style={styles.label}>Draft your first goal/project title:</label>
-            <input
-              type="text"
-              value={firstProject}
-              onChange={(e) => setFirstProject(e.target.value)}
-              style={styles.textInput}
-              placeholder="e.g. Implement semantic search API"
-              required
-            />
-          </div>
-
-          <div style={styles.insightsCard}>
-            <h4 style={styles.insightsTitle}>📊 Live Market Trends</h4>
-            <ul style={styles.insightsList}>
-              {state.marketInsights.map((insight, idx) => (
-                <li key={idx} style={styles.insightItem}>
-                  <span style={styles.bullet}>⚡</span> {insight}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <button onClick={() => setStep(2)} style={styles.primaryButton}>
-            Next: Scheduling Preferences →
-          </button>
-        </div>
-      )}
-
-      {step === 2 && (
-        <div>
-          <h2 style={styles.title}>2. Working Hours & Pacing ⏱️</h2>
+          <h2 style={styles.title}>1. Working Hours & Pacing ⏱️</h2>
           <p style={styles.subtitle}>Configure your time constraints and pacing preferences.</p>
 
           <div style={styles.formGroup}>
@@ -713,19 +612,16 @@ export default function OnboardingWizard() {
           </div>
 
           <div style={styles.buttonGroup}>
-            <button onClick={() => setStep(1)} style={styles.secondaryButton}>
-              Back
-            </button>
-            <button onClick={() => setStep(3)} style={styles.primaryButton}>
+            <button onClick={() => setStep(2)} style={styles.primaryButton}>
               Next: Calendar Scoping →
             </button>
           </div>
         </div>
       )}
 
-      {step === 3 && (
+      {step === 2 && (
         <div>
-          <h2 style={styles.title}>3. Calendar Scope Authorization 🔒</h2>
+          <h2 style={styles.title}>2. Calendar Scope Authorization 🔒</h2>
           <p style={styles.subtitle}>
             You must connect at least one calendar and designate exactly one as the <b>Write Destination</b> for the upskilling schedule.
           </p>
@@ -860,7 +756,7 @@ export default function OnboardingWizard() {
           </form>
 
           <div style={styles.buttonGroup}>
-            <button onClick={() => setStep(2)} style={styles.secondaryButton}>
+            <button onClick={() => setStep(1)} style={styles.secondaryButton}>
               Back
             </button>
             <button
@@ -868,7 +764,7 @@ export default function OnboardingWizard() {
               style={styles.primaryButton}
               disabled={isSaving || localCalendars.length === 0}
             >
-              {isSaving ? 'Staging Schedule...' : 'Finalize & Stage Schedule'}
+              {isSaving ? 'Saving preferences...' : 'Finalize & Continue to Goal Builder'}
             </button>
           </div>
         </div>

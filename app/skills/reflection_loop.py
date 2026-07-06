@@ -122,22 +122,43 @@ def process_user_reflection(
 
                     # Create prerequisite task
                     prereq = {
-                        "title": prereq_title,
+                        "title": f"Review: {prereq_title}",
+                        "description": f"Targeted review block based on reflection.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=2)).isoformat(),
                         "completed": False,
-                        "dueDate": (datetime.date.today() + datetime.timedelta(days=2)).isoformat()
+                        "tasks": [
+                            {
+                                "title": prereq_title,
+                                "description": f"Review topic: {prereq_title} to build foundational understanding.",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=2)).isoformat(),
+                                "estimated_time": "2 hours",
+                                "resource": "Review workspace documents and guides.",
+                                "completed": False
+                            }
+                        ]
                     }
                     sub_projects.insert(0, prereq)
 
-                    # Shift due dates of all uncompleted milestones forward by 3 days
-                    for task in sub_projects:
-                        if task == prereq:
+                    # Shift due dates of all uncompleted milestones and nested tasks forward by 3 days
+                    for milestone in sub_projects:
+                        if milestone == prereq:
                             continue
-                        if not task.get("completed") and task.get("dueDate"):
+                        if not milestone.get("completed") and milestone.get("dueDate"):
                             try:
-                                d = datetime.date.fromisoformat(task["dueDate"])
-                                task["dueDate"] = (d + datetime.timedelta(days=3)).isoformat()
+                                d = datetime.date.fromisoformat(milestone["dueDate"])
+                                new_date = max(datetime.date.today(), d + datetime.timedelta(days=3))
+                                milestone["dueDate"] = new_date.isoformat()
                             except Exception:
                                 pass
+                        
+                        for task in milestone.get("tasks", []):
+                            if not task.get("completed") and task.get("dueDate"):
+                                try:
+                                    dt = datetime.date.fromisoformat(task["dueDate"])
+                                    new_dt = max(datetime.date.today(), dt + datetime.timedelta(days=3))
+                                    task["dueDate"] = new_dt.isoformat()
+                                except Exception:
+                                    pass
 
                 elif inferred_action == "mastered":
                     adjustment_action = "accelerate_due_dates"
@@ -147,14 +168,23 @@ def process_user_reflection(
                         feedback_text = "Fantastic job mastering this so quickly! I've accelerated your remaining milestone due dates by 2 days."
 
                     # Shift due dates of all uncompleted milestones backward by 2 days
-                    for task in sub_projects:
-                        if not task.get("completed") and task.get("dueDate"):
+                    for milestone in sub_projects:
+                        if not milestone.get("completed") and milestone.get("dueDate"):
                             try:
-                                d = datetime.date.fromisoformat(task["dueDate"])
+                                d = datetime.date.fromisoformat(milestone["dueDate"])
                                 new_date = max(datetime.date.today(), d - datetime.timedelta(days=2))
-                                task["dueDate"] = new_date.isoformat()
+                                milestone["dueDate"] = new_date.isoformat()
                             except Exception:
                                 pass
+                        
+                        for task in milestone.get("tasks", []):
+                            if not task.get("completed") and task.get("dueDate"):
+                                try:
+                                    dt = datetime.date.fromisoformat(task["dueDate"])
+                                    new_dt = max(datetime.date.today(), dt - datetime.timedelta(days=2))
+                                    task["dueDate"] = new_dt.isoformat()
+                                except Exception:
+                                    pass
                 else:
                     adjustment_reason = "Learning is on track. No milestones adjusted."
                     if not feedback_text:

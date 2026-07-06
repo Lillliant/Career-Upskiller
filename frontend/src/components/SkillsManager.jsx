@@ -2,12 +2,21 @@ import React, { useState } from 'react';
 import { useAppState } from '../stateManager';
 
 export default function SkillsManager() {
-  const [state] = useAppState();
+  const [state, setState] = useAppState();
   
   // Filter states
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [selectedStatus, setSelectedStatus] = useState('All');
-  const [selectedCareer, setSelectedCareer] = useState('All');
+
+  // Expanded skills state: store skill names (lowercase) that are expanded
+  const [expandedSkills, setExpandedSkills] = useState({});
+
+  const toggleSkill = (skillKey) => {
+    setExpandedSkills(prev => ({
+      ...prev,
+      [skillKey]: !prev[skillKey]
+    }));
+  };
 
   // Extract all categories, statuses, and career applications dynamically
   const categories = ['All', ...new Set(state.goals.flatMap(g => 
@@ -16,24 +25,41 @@ export default function SkillsManager() {
 
   const statuses = ['All', 'to-do', 'in-progress', 'done', 'archived'];
 
-  const careers = ['All', ...new Set(state.goals.flatMap(g => 
-    (g.skills || []).map(s => s.career_application || 'General')
-  ))];
+  // Group projects under individual skills
+  const allSkillsMap = {};
+  state.goals.forEach(goal => {
+    (goal.skills || []).forEach(skill => {
+      const key = (skill.name || '').trim().toLowerCase();
+      if (!key) return;
+      if (!allSkillsMap[key]) {
+        allSkillsMap[key] = {
+          name: skill.name,
+          category: skill.category || 'Core',
+          projects: []
+        };
+      }
+      // Add project reference if not already present
+      if (!allSkillsMap[key].projects.some(p => p.id === goal.id)) {
+        allSkillsMap[key].projects.push(goal);
+      }
+    });
+  });
 
-  // Filter projects/goals
-  const filteredGoals = state.goals.filter(goal => {
-    const goalSkills = goal.skills || [];
-    
-    // Category match
-    const categoryMatch = selectedCategory === 'All' || goalSkills.some(s => s.category === selectedCategory);
-    
-    // Status match
-    const statusMatch = selectedStatus === 'All' || goal.status === selectedStatus;
-    
-    // Career match
-    const careerMatch = selectedCareer === 'All' || goalSkills.some(s => s.career_application === selectedCareer);
+  const uniqueSkills = Object.values(allSkillsMap);
 
-    return categoryMatch && statusMatch && careerMatch;
+  // Filter the list of unique skills and their nested projects
+  const filteredSkills = uniqueSkills.map(skill => {
+    const matchingProjects = skill.projects.filter(p => {
+      return selectedStatus === 'All' || p.status === selectedStatus;
+    });
+    return {
+      ...skill,
+      projects: matchingProjects
+    };
+  }).filter(skill => {
+    const categoryMatch = selectedCategory === 'All' || skill.category === selectedCategory;
+    const hasProjects = skill.projects.length > 0;
+    return categoryMatch && hasProjects;
   });
 
   return (
@@ -57,7 +83,7 @@ export default function SkillsManager() {
         </div>
 
         <div style={styles.filterGroup}>
-          <label style={styles.filterLabel}>Filter by Status:</label>
+          <label style={styles.filterLabel}>Filter by Project Status:</label>
           <select 
             value={selectedStatus} 
             onChange={(e) => setSelectedStatus(e.target.value)}
@@ -65,63 +91,98 @@ export default function SkillsManager() {
           >
             {statuses.map((s, i) => <option key={i} value={s}>{s}</option>)}
           </select>
-        </div>
-
-        <div style={styles.filterGroup}>
-          <label style={styles.filterLabel}>Filter by Career track:</label>
-          <select 
-            value={selectedCareer} 
-            onChange={(e) => setSelectedCareer(e.target.value)}
-            style={styles.selectInput}
-          >
-            {careers.map((car, i) => <option key={i} value={car}>{car}</option>)}
-          </select>
+          <span style={styles.filterHelpText}>Shows skills with at least one project in this status</span>
         </div>
       </div>
 
       {/* Skills Grid */}
       <div style={styles.grid}>
-        {filteredGoals.length === 0 ? (
+        {filteredSkills.length === 0 ? (
           <div style={styles.emptyCard} className="glass-card">
-            <span>No goals found matching the selected filters. Build new projects in the Goal Builder chat!</span>
+            <span>No skills found matching the selected filters. Build new projects in the Goal Builder chat!</span>
           </div>
         ) : (
-          filteredGoals.map((g) => (
-            <div key={g.id} style={styles.skillCard} className="glass-card">
-              <div style={styles.cardHeader}>
-                <h3 style={styles.cardTitle}>{g.title}</h3>
-                <span style={{
-                  ...styles.statusBadge,
-                  backgroundColor: g.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : g.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(120, 120, 120, 0.15)',
-                  color: g.status === 'done' ? 'var(--color-success)' : g.status === 'in-progress' ? 'var(--color-accent)' : 'var(--color-text-muted)'
-                }}>
-                  {g.status}
-                </span>
-              </div>
-              <p style={styles.cardDesc}>{g.description}</p>
-              
-              <div style={styles.skillsSection}>
-                <h4 style={styles.skillsHeading}>Learned Skill Map:</h4>
-                {g.skills && g.skills.length > 0 ? (
-                  <div style={styles.skillsList}>
-                    {g.skills.map((skill, idx) => (
-                      <div key={idx} style={styles.skillTagCard}>
-                        <div style={styles.skillNameRow}>
-                          <span style={styles.skillTagName}>💡 {skill.name}</span>
-                          <span style={styles.categoryBadge}>{skill.category}</span>
-                        </div>
-                        <div style={styles.careerApplyText}>
-                          💼 Career Application: <strong>{skill.career_application}</strong>
-                        </div>
+          filteredSkills.map((skill) => {
+            const skillKey = skill.name.toLowerCase();
+            const isExpanded = !!expandedSkills[skillKey];
+            const projectCount = skill.projects.length;
+            
+            return (
+              <div 
+                key={skillKey} 
+                style={{
+                  ...styles.skillCard,
+                  borderColor: isExpanded ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-card)',
+                  backgroundColor: isExpanded ? 'rgba(30, 41, 59, 0.6)' : 'var(--bg-card)'
+                }} 
+                className="glass-card"
+              >
+                {/* Header section - clickable */}
+                <div 
+                  style={styles.cardHeaderClickable} 
+                  onClick={() => toggleSkill(skillKey)}
+                >
+                  <div style={styles.headerLeft}>
+                    <span style={styles.skillEmoji}>💡</span>
+                    <div style={styles.skillMainInfo}>
+                      <h3 style={styles.cardTitle}>{skill.name}</h3>
+                      <div style={styles.metaRow}>
+                        <span style={styles.categoryBadge}>{skill.category}</span>
                       </div>
-                    ))}
+                    </div>
                   </div>
-                ) : (
-                  <span style={styles.emptySkillsText}>No skills declared for this project yet. Add them in Projects & Goals.</span>
+                  
+                  <div style={styles.headerRight}>
+                    <span style={styles.projectCountBadge}>
+                      📂 {projectCount} {projectCount === 1 ? 'Project' : 'Projects'}
+                    </span>
+                    <span style={{
+                      ...styles.expandArrow,
+                      transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)'
+                    }}>
+                      ▼
+                    </span>
+                  </div>
+                </div>
+
+                {/* Expanded area showing projects */}
+                {isExpanded && (
+                  <div style={styles.projectsContainer} className="animate-fade-in">
+                    <h4 style={styles.projectsHeading}>Associated Projects:</h4>
+                    <div style={styles.projectsGrid}>
+                      {skill.projects.map((proj) => (
+                        <div key={proj.id} style={styles.projectSubCard}>
+                          <div style={styles.projectCardHeader}>
+                            <span style={styles.projectCardTitle}>{proj.title}</span>
+                            <span style={{
+                              ...styles.statusBadge,
+                              backgroundColor: proj.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : proj.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(120, 120, 120, 0.15)',
+                              color: proj.status === 'done' ? 'var(--color-success)' : proj.status === 'in-progress' ? 'var(--color-accent)' : 'var(--color-text-muted)'
+                            }}>
+                              {proj.status}
+                            </span>
+                          </div>
+                          <p style={styles.projectCardDesc}>{proj.description}</p>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation(); // Avoid toggling expansion
+                              setState({ 
+                                activeTab: 'projects',
+                                activeGoalId: proj.id 
+                              });
+                            }}
+                            style={styles.viewProjectBtn}
+                          >
+                            Go to Project ➔
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
@@ -182,13 +243,28 @@ const styles = {
     gap: '20px',
   },
   skillCard: {
-    padding: '24px',
+    padding: '20px 24px',
+    transition: 'all 0.3s ease',
   },
-  cardHeader: {
+  cardHeaderClickable: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: '8px',
+    cursor: 'pointer',
+    userSelect: 'none',
+  },
+  headerLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '16px',
+  },
+  skillEmoji: {
+    fontSize: '24px',
+  },
+  skillMainInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
   },
   cardTitle: {
     fontSize: '16px',
@@ -196,49 +272,11 @@ const styles = {
     color: 'var(--color-text-main)',
     margin: 0,
   },
-  statusBadge: {
-    fontSize: '10px',
-    fontWeight: '700',
-    padding: '3px 10px',
-    borderRadius: '12px',
-    textTransform: 'uppercase',
-  },
-  cardDesc: {
-    fontSize: '12px',
-    color: 'var(--color-text-muted)',
-    lineHeight: '1.4',
-    margin: '0 0 20px 0',
-  },
-  skillsSection: {
-    borderTop: '1px solid var(--border-divider)',
-    paddingTop: '16px',
-  },
-  skillsHeading: {
-    fontSize: '12px',
-    color: 'var(--color-text-main)',
-    fontWeight: '700',
-    marginBottom: '10px',
-  },
-  skillsList: {
+  metaRow: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-  },
-  skillTagCard: {
-    backgroundColor: 'var(--bg-sidebar)',
-    border: '1px solid var(--border-card)',
-    borderRadius: '8px',
-    padding: '12px',
-  },
-  skillNameRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
     alignItems: 'center',
-  },
-  skillTagName: {
-    fontSize: '13px',
-    fontWeight: '600',
-    color: 'var(--color-text-main)',
+    gap: '12px',
+    flexWrap: 'wrap',
   },
   categoryBadge: {
     fontSize: '9px',
@@ -249,14 +287,93 @@ const styles = {
     fontWeight: '700',
     textTransform: 'uppercase',
   },
-  careerApplyText: {
+  filterHelpText: {
     fontSize: '11px',
     color: 'var(--color-text-muted)',
-    marginTop: '6px',
+    marginTop: '2px',
+    fontWeight: 'normal',
   },
-  emptySkillsText: {
+  headerRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '16px',
+  },
+  projectCountBadge: {
+    fontSize: '11px',
+    fontWeight: '700',
+    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+    color: 'var(--color-accent)',
+    padding: '4px 10px',
+    borderRadius: '12px',
+    border: '1px solid rgba(99, 102, 241, 0.2)',
+  },
+  expandArrow: {
     fontSize: '11px',
     color: 'var(--color-text-muted)',
+    transition: 'transform 0.2s ease',
+  },
+  projectsContainer: {
+    marginTop: '20px',
+    borderTop: '1px solid var(--border-divider)',
+    paddingTop: '16px',
+  },
+  projectsHeading: {
+    fontSize: '12px',
+    color: 'var(--color-text-muted)',
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginBottom: '12px',
+  },
+  projectsGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr',
+    gap: '12px',
+  },
+  projectSubCard: {
+    backgroundColor: 'var(--bg-sidebar)',
+    border: '1px solid var(--border-card)',
+    borderRadius: '8px',
+    padding: '16px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  projectCardHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  projectCardTitle: {
+    fontSize: '14px',
+    fontWeight: '600',
+    color: 'var(--color-text-main)',
+  },
+  statusBadge: {
+    fontSize: '10px',
+    fontWeight: '700',
+    padding: '3px 10px',
+    borderRadius: '12px',
+    textTransform: 'uppercase',
+  },
+  projectCardDesc: {
+    fontSize: '12px',
+    color: 'var(--color-text-muted)',
+    lineHeight: '1.4',
+    margin: 0,
+  },
+  viewProjectBtn: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'transparent',
+    border: '1px solid var(--color-accent)',
+    color: 'var(--color-accent)',
+    padding: '6px 12px',
+    borderRadius: '6px',
+    fontSize: '11px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    marginTop: '4px',
+    outline: 'none',
   },
   emptyCard: {
     padding: '40px',

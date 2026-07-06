@@ -228,6 +228,7 @@ def get_calendar_free_busy(start_time: str, end_time: str) -> list[dict[str, Any
                             end_val = f"{end_val}T23:59:59-04:00"
 
                         events.append({
+                            "id": item.get("id"),
                             "summary": item.get("summary", "Busy"),
                             "start": normalize_to_local_offset(start_val),
                             "end": normalize_to_local_offset(end_val)
@@ -311,6 +312,111 @@ def write_calendar_event(
             "status": "error",
             "message": f"Failed to connect to Google Calendar: {e}"
         }
+
+def delete_calendar_event(google_event_id: str) -> dict[str, Any]:
+    """Deletes an event from the user's designated Google Calendar."""
+    logger.info(f"DELETING EVENT FROM CALENDAR: {google_event_id}")
+
+    creds = get_google_credentials()
+    if not creds:
+        logger.warning("No Google credentials resolved. Cannot delete from Google Calendar.")
+        return {"status": "success", "message": "Successfully deleted locally."}
+
+    profile = state_store.get_user_profile() or {}
+    target_calendars = profile.get("target_calendars", [])
+    write_cal = next(
+        (c for c in target_calendars if c.get("role") == "write" and c.get("type") == "google"),
+        None
+    )
+    cal_id = write_cal.get("id") if write_cal else "primary"
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {creds.token}"
+        }
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal_id)}/events/{google_event_id}"
+        resp = requests.delete(url, headers=headers, timeout=10)
+        if resp.status_code in (200, 204):
+            return {
+                "status": "success",
+                "message": f"Successfully deleted from calendar: {google_event_id}"
+            }
+        elif resp.status_code == 404:
+            logger.warning(f"Event {google_event_id} not found on Google Calendar, treating as deleted.")
+            return {
+                "status": "success",
+                "message": "Event not found on Google Calendar, treated as deleted."
+            }
+        else:
+            logger.error(f"Failed to delete Google Calendar event {google_event_id}: HTTP {resp.status_code} - {resp.text}")
+            return {
+                "status": "error",
+                "message": f"Failed to delete from Google Calendar: HTTP {resp.status_code}"
+            }
+    except Exception as e:
+        logger.error(f"Error deleting from Google Calendar: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to connect to Google Calendar: {e}"
+        }
+
+def update_calendar_event(
+    google_event_id: str, start_time: str, end_time: str, summary: str = None, description: str = None
+) -> dict[str, Any]:
+    """Updates/Patches an event in the user's designated Google Calendar."""
+    logger.info(f"UPDATING EVENT ON CALENDAR: {google_event_id} ({start_time} to {end_time})")
+
+    creds = get_google_credentials()
+    if not creds:
+        logger.warning("No Google credentials resolved. Cannot update Google Calendar.")
+        return {"status": "success", "message": "Successfully updated locally."}
+
+    profile = state_store.get_user_profile() or {}
+    target_calendars = profile.get("target_calendars", [])
+    write_cal = next(
+        (c for c in target_calendars if c.get("role") == "write" and c.get("type") == "google"),
+        None
+    )
+    cal_id = write_cal.get("id") if write_cal else "primary"
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json"
+        }
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal_id)}/events/{google_event_id}"
+        body = {
+            "start": {
+                "dateTime": start_time,
+            },
+            "end": {
+                "dateTime": end_time,
+            }
+        }
+        if summary is not None:
+            body["summary"] = summary
+        if description is not None:
+            body["description"] = description
+
+        resp = requests.patch(url, headers=headers, json=body, timeout=10)
+        if resp.status_code in (200, 204):
+            return {
+                "status": "success",
+                "message": f"Successfully updated event on Google Calendar: {google_event_id}"
+            }
+        else:
+            logger.error(f"Failed to update Google Calendar event {google_event_id}: HTTP {resp.status_code} - {resp.text}")
+            return {
+                "status": "error",
+                "message": f"Failed to update Google Calendar: HTTP {resp.status_code}"
+            }
+    except Exception as e:
+        logger.error(f"Error updating Google Calendar: {e}")
+        return {
+            "status": "error",
+            "message": f"Failed to connect to Google Calendar: {e}"
+        }
+
 
 def sync_local_events_to_google(profile: dict) -> dict[str, Any]:
     """Syncs any locally scheduled upskilling events missing google_event_id to the designated Google Calendar."""

@@ -4,8 +4,25 @@ import { useAppState } from '../stateManager';
 export default function AnalyticsSummary() {
   const [state] = useAppState();
 
-  // Helper to calculate total hours scheduled
-  const calculateScheduledHours = () => {
+  // Helper to calculate total scheduled hours (across all weeks)
+  const calculateTotalScheduledHours = () => {
+    let totalMs = 0;
+    const events = state.scheduledEvents && state.scheduledEvents.length > 0
+      ? state.scheduledEvents
+      : state.calendarEvents;
+      
+    events.forEach(evt => {
+      if (!evt.type || evt.type === 'learning') {
+        const start = new Date(evt.start);
+        const end = new Date(evt.end);
+        totalMs += (end - start);
+      }
+    });
+    return (totalMs / (1000 * 60 * 60)); // convert to hours
+  };
+
+  // Helper to calculate scheduled hours specifically for the current selected week offset
+  const calculateWeeklyScheduledHours = () => {
     let totalMs = 0;
     state.calendarEvents.forEach(evt => {
       if (evt.type === 'learning') {
@@ -17,9 +34,10 @@ export default function AnalyticsSummary() {
     return (totalMs / (1000 * 60 * 60)); // convert to hours
   };
 
-  const totalHoursScheduled = calculateScheduledHours();
+  const totalHoursScheduled = calculateTotalScheduledHours();
+  const weeklyHoursScheduled = calculateWeeklyScheduledHours();
   const weeklyTarget = state.hoursPerWeek || 5;
-  const progressPercent = Math.min(Math.round((totalHoursScheduled / weeklyTarget) * 100), 100);
+  const progressPercent = Math.min(Math.round((weeklyHoursScheduled / weeklyTarget) * 100), 100);
 
   // Group goals and count milestones
   const activeGoalsCount = state.goals.filter(g => g.status === 'in-progress' || g.status === 'to-do').length;
@@ -29,8 +47,15 @@ export default function AnalyticsSummary() {
   let completedTasks = 0;
   state.goals.forEach(g => {
     if (g.sub_projects) {
-      totalTasks += g.sub_projects.length;
-      completedTasks += g.sub_projects.filter(t => t.completed).length;
+      g.sub_projects.forEach(m => {
+        if (m.tasks && m.tasks.length > 0) {
+          totalTasks += m.tasks.length;
+          completedTasks += m.tasks.filter(t => t.completed).length;
+        } else {
+          totalTasks += 1;
+          if (m.completed) completedTasks += 1;
+        }
+      });
     }
   });
 
@@ -46,17 +71,17 @@ export default function AnalyticsSummary() {
       </div>
 
       <div style={styles.grid}>
-        {/* Metric 1: Hours Allocated */}
+        {/* Metric 1: Total Hours Scheduled */}
         <div style={styles.metricCard} className="glass-card">
           <div style={styles.metricHeader}>
-            <span style={styles.metricLabel}>Total Weekly Allocated</span>
+            <span style={styles.metricLabel}>Total Accumulated Time</span>
             <span style={styles.metricIcon}>⏱️</span>
           </div>
           <div style={styles.metricValue}>
             {totalHoursScheduled.toFixed(1)} <span style={styles.unit}>hrs</span>
           </div>
           <p style={styles.metricDesc}>
-            Sum of approved skill development blocks scheduled this week.
+            Sum of all approved skill development blocks scheduled across all weeks.
           </p>
         </div>
 
@@ -92,8 +117,8 @@ export default function AnalyticsSummary() {
       {/* Target Progress Bar Section */}
       <div style={styles.progressSection} className="glass-card">
         <div style={styles.progressLabelRow}>
-          <span>Weekly Allocation Target Pace</span>
-          <span>{totalHoursScheduled.toFixed(1)}h / {weeklyTarget}h ({progressPercent}%)</span>
+          <span>Weekly Allocation Target Pace (Week Offset: {state.currentWeekOffset})</span>
+          <span>{weeklyHoursScheduled.toFixed(1)}h / {weeklyTarget}h ({progressPercent}%)</span>
         </div>
         <div style={styles.progressBarBg}>
           <div 
@@ -118,8 +143,19 @@ export default function AnalyticsSummary() {
           <div style={styles.goalsProgressContainer}>
             {state.goals.map((g) => {
               // Calculate completion of task list
-              const tCount = g.sub_projects ? g.sub_projects.length : 0;
-              const cCount = g.sub_projects ? g.sub_projects.filter(t => t.completed).length : 0;
+              let tCount = 0;
+              let cCount = 0;
+              if (g.sub_projects) {
+                g.sub_projects.forEach(m => {
+                  if (m.tasks && m.tasks.length > 0) {
+                    tCount += m.tasks.length;
+                    cCount += m.tasks.filter(t => t.completed).length;
+                  } else {
+                    tCount += 1;
+                    if (m.completed) cCount += 1;
+                  }
+                });
+              }
               const pct = tCount > 0 ? Math.round((cCount / tCount) * 100) : 0;
 
               return (

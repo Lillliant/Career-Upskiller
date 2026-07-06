@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import uuid
+import datetime
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -13,7 +14,7 @@ from google.adk.events.request_input import RequestInput
 from google.adk.workflow import Workflow, node
 from google.genai import types
 
-from app.mcp_clients import get_calendar_free_busy, write_calendar_event
+from app.mcp_clients import get_calendar_free_busy, write_calendar_event, delete_calendar_event
 from app.skills.onboarding_elicitation import onboarding_interview
 from app.state_store import state_store
 
@@ -27,11 +28,62 @@ def generate_signature(transaction_id: str) -> str:
     ).hexdigest()
 
 
+def parse_duration(est_str: str | None) -> int:
+    """Parses a duration string (e.g. '2 hours', '1.5 hours', '30 minutes') and returns duration in minutes.
+    Defaults to 60 minutes (1 hour) if empty or invalid.
+    """
+    if not est_str:
+        return 60
+    est_str = str(est_str).lower().strip()
+    try:
+        parts = est_str.split()
+        if not parts:
+            return 60
+        val = float(parts[0])
+        if "hour" in est_str:
+            return int(val * 60)
+        elif "min" in est_str:
+            return int(val)
+        return 60
+    except Exception:
+        return 60
+
+
+def find_task_due_date_for_event(event: dict[str, Any], goals: list[dict[str, Any]]) -> str | None:
+    """Finds the due date of a task associated with an event by inspecting the goals hierarchy."""
+    summary = event.get("summary", "")
+    goal_title = ""
+    task_title = ""
+    if " - " in summary:
+        parts = summary.split(" - ", 1)
+        if parts[0].startswith("Learning: "):
+            goal_title = parts[0][len("Learning: "):].strip()
+        else:
+            goal_title = parts[0].strip()
+        task_title = parts[1].strip()
+    elif summary.startswith("Learning: "):
+        goal_title = summary[len("Learning: "):].strip()
+        
+    for g in goals:
+        if g.get("title") == goal_title:
+            if task_title:
+                for m in g.get("sub_projects", []):
+                    for t in m.get("tasks", []):
+                        if t.get("title") == task_title:
+                            return t.get("dueDate")
+            else:
+                for m in g.get("sub_projects", []):
+                    if not m.get("completed"):
+                        return m.get("dueDate")
+                return g.get("dueDate")
+    return None
+
+
 @node
 async def check_onboarding(ctx: Context, node_input: Any) -> Event:
     """Check if the user profile exists in state store."""
     profile = state_store.get_user_profile()
-    if not profile or not profile.get("career_goals"):
+    if not profile or (not profile.get("onboarded") and not profile.get("career_goals")):
         # Not onboarded: route to onboarding node
         return Event(output=node_input, actions=EventActions(route="needs_onboarding"))
     return Event(output=node_input, actions=EventActions(route="onboarded"))
@@ -84,13 +136,9 @@ async def stage_schedule(
     if not profile:
         profile = {"career_goals": "AI Engineering", "hours_per_week": 5}
 
-    import datetime
-
-    # Target: weekly_hours_budget, divided by active days
+    # Target: weekly_hours_budget
     weekly_hours = profile.get("hours_per_week", 5)
     study_days = profile.get("study_days", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
-    active_days_count = max(1, len(study_days))
-    target_daily_mins = int((weekly_hours * 60) / active_days_count)
 
     # Preferred working hours
     work_start_str = profile.get("preferred_start_time", "09:00")
@@ -105,18 +153,77 @@ async def stage_schedule(
     start_minutes = sh * 60 + sm
     end_minutes = eh * 60 + em
 
+    # Date window: start from today or July 2nd, 2026, whichever is later
+    base_date = max(datetime.date.today(), datetime.date(2026, 7, 2))
+
     # Retrieve goals to alternate
     goals = profile.get("goals", [])
-    goal_titles = [g.get("title") for g in goals] if goals else []
-    if not goal_titles:
-        goal_titles = [profile.get("career_goals", "AI Engineering")]
+
+    # Harvest all uncompleted tasks from active goals
+    uncompleted_tasks = []
+    for g in goals:
+        if g.get("status") in ["to-do", "in-progress"]:
+            sub_projects = g.get("sub_projects", [])
+            if not sub_projects:
+                uncompleted_tasks.append({
+                    "task": {
+                        "title": g.get("title"),
+                        "description": g.get("description", f"Focused upskilling for goal '{g.get('title')}'."),
+                        "estimated_time": "1 hour",
+                        "dueDate": (base_date + datetime.timedelta(days=7)).isoformat(),
+                        "completed": False
+                    },
+                    "milestone": {
+                        "title": "General"
+                    },
+                    "goal": g,
+                    "is_fallback": True
+                })
+            else:
+                for m in sub_projects:
+                    tasks = m.get("tasks", [])
+                    if not tasks:
+                        if not m.get("completed"):
+                            uncompleted_tasks.append({
+                                "task": {
+                                    "title": m.get("title"),
+                                    "description": m.get("description", f"Milestone: {m.get('title')}"),
+                                    "estimated_time": "1 hour",
+                                    "dueDate": m.get("dueDate", (base_date + datetime.timedelta(days=7)).isoformat()),
+                                    "completed": False
+                                },
+                                "milestone": m,
+                                "goal": g,
+                                "is_fallback": True
+                            })
+                    else:
+                        for t in tasks:
+                            if not t.get("completed"):
+                                task_est = parse_duration(t.get("estimated_time"))
+                                task_allocated = t.get("allocated_time_mins", 0)
+                                if task_est - task_allocated > 0:
+                                    uncompleted_tasks.append({
+                                        "task": t,
+                                        "milestone": m,
+                                        "goal": g,
+                                        "is_fallback": False
+                                    })
+
+    def get_task_due_date(item):
+        d_str = item["task"].get("dueDate")
+        if d_str:
+            try:
+                return datetime.date.fromisoformat(d_str)
+            except ValueError:
+                pass
+        return datetime.date.max
+
+    uncompleted_tasks.sort(key=get_task_due_date)
 
     proposed_blocks = []
     failed_days = []
     scarcity_flag = False
-
-    # Date window: start from 2026-07-02 (Thursday) for 7 days
-    base_date = datetime.date(2026, 7, 2)
+    events_to_delete = []
 
     # Fetch busy times from Calendar MCP if whitelisted/selected
     target_calendars = profile.get("target_calendars", [])
@@ -125,9 +232,9 @@ async def stage_schedule(
     mcp_busy = []
     if google_allowed:
         try:
-            mcp_busy = get_calendar_free_busy(
-                "2026-07-02T00:00:00Z", "2026-07-08T23:59:59Z"
-            )
+            start_query_iso = datetime.datetime.combine(base_date, datetime.time.min).isoformat() + "Z"
+            end_query_iso = datetime.datetime.combine(base_date + datetime.timedelta(days=7), datetime.time.max).isoformat() + "Z"
+            mcp_busy = get_calendar_free_busy(start_query_iso, end_query_iso)
         except Exception:
             mcp_busy = []
 
@@ -140,6 +247,13 @@ async def stage_schedule(
             except Exception as e:
                 print(f"Error parsing iCal: {e}")
 
+    # Current local time zone of the user is EDT (-04:00) as indicated in their metadata
+    tz_local = datetime.timezone(datetime.timedelta(hours=-4))
+    now_local = datetime.datetime.now(tz_local)
+
+    weekly_remaining_budget_mins = weekly_hours * 60
+    task_idx = 0
+
     # Build weekly schedule day by day
     for day_offset in range(7):
         current_day = base_date + datetime.timedelta(days=day_offset)
@@ -147,11 +261,20 @@ async def stage_schedule(
         if day_name not in study_days:
             continue
 
+        if task_idx >= len(uncompleted_tasks):
+            break
+
+        if weekly_remaining_budget_mins < 30:
+            break
+
         current_day_str = current_day.isoformat()
 
-        # Filter external events for this day
+        # Filter external events for this day, skipping any scheduled events currently staged for deletion/displacement
+        to_delete_ids = {evt.get("google_event_id") for evt in events_to_delete if evt.get("google_event_id")}
         day_busy_slots = []
         for evt in mcp_busy:
+            if evt.get("id") in to_delete_ids:
+                continue
             evt_start = evt.get("start", "")
             evt_end = evt.get("end", "")
             if evt_start.startswith(current_day_str):
@@ -163,8 +286,32 @@ async def stage_schedule(
                 except Exception:
                     pass
 
-        # Pick goal for this day
-        goal_title = goal_titles[day_offset % len(goal_titles)]
+        # Retrieve current task
+        item = uncompleted_tasks[task_idx]
+        task = item["task"]
+        milestone = item["milestone"]
+        goal = item["goal"]
+
+        # Calculate adjusted duration based on estimated time, remaining tasks, and remaining budget
+        task_est_mins = parse_duration(task.get("estimated_time"))
+        task_allocated_mins = task.get("allocated_time_mins", 0)
+        base_duration_mins = max(0, task_est_mins - task_allocated_mins)
+        
+        remaining_tasks_base = sum(
+            max(0, parse_duration(t["task"].get("estimated_time")) - t["task"].get("allocated_time_mins", 0))
+            for t in uncompleted_tasks[task_idx:]
+        )
+
+        if weekly_remaining_budget_mins > 0 and remaining_tasks_base > 0:
+            ratio = weekly_remaining_budget_mins / remaining_tasks_base
+            adjusted_duration_mins = base_duration_mins * ratio
+            if ratio > 1.0:
+                adjusted_duration_mins = min(adjusted_duration_mins, base_duration_mins * 1.5, 120)
+        else:
+            adjusted_duration_mins = base_duration_mins
+
+        adjusted_duration_mins = round(adjusted_duration_mins / 15) * 15
+        adjusted_duration_mins = max(30, min(adjusted_duration_mins, weekly_remaining_budget_mins))
 
         # Partition working hours into 15-minute slots
         total_slots = int((end_minutes - start_minutes) / 15)
@@ -176,60 +323,181 @@ async def stage_schedule(
             for idx in range(s_idx, e_idx):
                 slot_status[idx] = False
 
-        # Try to schedule target_daily_mins
-        target_slots_needed = int(target_daily_mins / 15)
-
-        # 1. First attempt: Find contiguous free slots of target size
+        # Attempt to schedule in contiguous slots
+        target_slots_needed = int(adjusted_duration_mins / 15)
         scheduled = False
-        for i in range(total_slots - target_slots_needed + 1):
-            if all(slot_status[i + j] for j in range(target_slots_needed)):
-                s_mins = start_minutes + i * 15
-                e_mins = s_mins + target_daily_mins
 
-                s_hour, s_min = divmod(s_mins, 60)
-                e_hour, e_min = divmod(e_mins, 60)
-
-                proposed_blocks.append({
-                    "id": f"evt-{uuid.uuid4().hex[:6]}",
-                    "summary": f"Learning: {goal_title}",
-                    "start": f"{current_day_str}T{s_hour:02d}:{s_min:02d}:00-04:00",
-                    "end": f"{current_day_str}T{e_hour:02d}:{e_min:02d}:00-04:00",
-                    "description": f"Focused upskilling block for goal '{goal_title}'."
-                })
-                scheduled = True
-                break
-
-        # 2. Second attempt (Graceful Degradation): If it failed, try to fit a 30-minute block (2 slots)
-        if not scheduled and target_daily_mins > 30:
-            scarcity_flag = True
-            degraded_slots_needed = 2
-            for i in range(total_slots - degraded_slots_needed + 1):
-                if all(slot_status[i + j] for j in range(degraded_slots_needed)):
+        for current_target in range(target_slots_needed, 1, -1):
+            actual_duration = current_target * 15
+            for i in range(total_slots - current_target + 1):
+                if all(slot_status[i + j] for j in range(current_target)):
                     s_mins = start_minutes + i * 15
-                    e_mins = s_mins + 30
+                    e_mins = s_mins + actual_duration
 
                     s_hour, s_min = divmod(s_mins, 60)
                     e_hour, e_min = divmod(e_mins, 60)
 
+                    proposed_start_str = f"{current_day_str}T{s_hour:02d}:{s_min:02d}:00-04:00"
+                    try:
+                        proposed_start_dt = datetime.datetime.fromisoformat(proposed_start_str)
+                        if proposed_start_dt < now_local:
+                            continue
+                    except Exception:
+                        pass
+
                     proposed_blocks.append({
                         "id": f"evt-{uuid.uuid4().hex[:6]}",
-                        "summary": f"Micro-learning: {goal_title} (Reduced)",
-                        "start": f"{current_day_str}T{s_hour:02d}:{s_min:02d}:00-04:00",
+                        "summary": f"Learning: {goal.get('title')} - {task.get('title')}",
+                        "start": proposed_start_str,
                         "end": f"{current_day_str}T{e_hour:02d}:{e_min:02d}:00-04:00",
-                        "description": f"Micro learning session for '{goal_title}' scheduled due to time scarcity."
+                        "description": f"Task: {task.get('title')}\nMilestone: {milestone.get('title')}\nProject: {goal.get('title')}\n\nDescription: {task.get('description', '')}"
                     })
                     scheduled = True
+                    weekly_remaining_budget_mins -= actual_duration
+                    task_idx += 1
                     break
+            if scheduled:
+                break
 
-        # 3. Third attempt: If still not scheduled, we drop this day's block and notify user
+        # Displacement logic: if density prevents scheduling, try to displace a future event with a later due date
         if not scheduled:
-            scarcity_flag = True
-            failed_days.append(day_name)
+            candidates = []
+            for evt in profile.get("scheduled_events", []):
+                if evt.get("start", "").startswith(current_day_str):
+                    due_date_other_str = find_task_due_date_for_event(evt, goals)
+                    if due_date_other_str:
+                        try:
+                            due_date_other = datetime.date.fromisoformat(due_date_other_str)
+                            due_date_curr = datetime.date.fromisoformat(task.get("dueDate", ""))
+                            if due_date_other > due_date_curr:
+                                candidates.append((due_date_other, evt))
+                        except Exception:
+                            pass
+
+            if candidates:
+                # Sort candidates by due date descending (latest first)
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                best_evt = candidates[0][1]
+
+                # Propose moving/deleting this event
+                events_to_delete.append(best_evt)
+
+                # Free up the slots occupied by the displaced event
+                evt_start = best_evt.get("start", "")
+                evt_end = best_evt.get("end", "")
+                try:
+                    shour, smin = map(int, evt_start[11:16].split(":"))
+                    ehour, emin = map(int, evt_end[11:16].split(":"))
+                    s_idx = max(0, int((shour * 60 + smin - start_minutes) / 15))
+                    e_idx = min(total_slots, int((ehour * 60 + emin - start_minutes) / 15))
+                    for idx in range(s_idx, e_idx):
+                        slot_status[idx] = True
+                except Exception:
+                    pass
+
+                # Add the displaced event's task back to the uncompleted queue to be rescheduled
+                found_task_item = None
+                goal_title = ""
+                task_title = ""
+                summary = best_evt.get("summary", "")
+                if " - " in summary:
+                    parts = summary.split(" - ", 1)
+                    goal_title = parts[0][len("Learning: "):].strip() if parts[0].startswith("Learning: ") else parts[0].strip()
+                    task_title = parts[1].strip()
+                elif summary.startswith("Learning: "):
+                    goal_title = summary[len("Learning: "):].strip()
+
+                for g in goals:
+                    if g.get("title") == goal_title:
+                        for m in g.get("sub_projects", []):
+                            if task_title:
+                                for t in m.get("tasks", []):
+                                    if t.get("title") == task_title:
+                                        found_task_item = {
+                                            "task": t,
+                                            "milestone": m,
+                                            "goal": g,
+                                            "is_fallback": False
+                                        }
+                                        break
+                            else:
+                                if not m.get("completed"):
+                                    found_task_item = {
+                                        "task": {
+                                            "title": m.get("title"),
+                                            "description": m.get("description", ""),
+                                            "estimated_time": "1 hour",
+                                            "dueDate": m.get("dueDate"),
+                                            "completed": False
+                                        },
+                                        "milestone": m,
+                                        "goal": g,
+                                        "is_fallback": True
+                                    }
+                                    break
+                        if found_task_item:
+                            break
+
+                if found_task_item:
+                    uncompleted_tasks.append(found_task_item)
+                    uncompleted_tasks[task_idx:] = sorted(uncompleted_tasks[task_idx:], key=get_task_due_date)
+
+                # Retry scheduling the current task in the freed space
+                for current_target in range(target_slots_needed, 1, -1):
+                    actual_duration = current_target * 15
+                    for i in range(total_slots - current_target + 1):
+                        if all(slot_status[i + j] for j in range(current_target)):
+                            s_mins = start_minutes + i * 15
+                            e_mins = s_mins + actual_duration
+
+                            s_hour, s_min = divmod(s_mins, 60)
+                            e_hour, e_min = divmod(e_mins, 60)
+
+                            proposed_start_str = f"{current_day_str}T{s_hour:02d}:{s_min:02d}:00-04:00"
+                            try:
+                                proposed_start_dt = datetime.datetime.fromisoformat(proposed_start_str)
+                                if proposed_start_dt < now_local:
+                                    continue
+                            except Exception:
+                                pass
+
+                            proposed_blocks.append({
+                                "id": f"evt-{uuid.uuid4().hex[:6]}",
+                                "summary": f"Learning: {goal.get('title')} - {task.get('title')}",
+                                "start": proposed_start_str,
+                                "end": f"{current_day_str}T{e_hour:02d}:{e_min:02d}:00-04:00",
+                                "description": f"Task: {task.get('title')}\nMilestone: {milestone.get('title')}\nProject: {goal.get('title')}\n\nDescription: {task.get('description', '')}"
+                            })
+                            scheduled = True
+                            weekly_remaining_budget_mins -= actual_duration
+                            task_idx += 1
+                            break
+                    if scheduled:
+                        break
+
+        # Flag scarcity if still not scheduled
+        if not scheduled:
+            day_has_future_slots = False
+            for i in range(total_slots):
+                slot_start_mins = start_minutes + i * 15
+                s_hour, s_min = divmod(slot_start_mins, 60)
+                proposed_start_str = f"{current_day_str}T{s_hour:02d}:{s_min:02d}:00-04:00"
+                try:
+                    proposed_start_dt = datetime.datetime.fromisoformat(proposed_start_str)
+                    if proposed_start_dt >= now_local:
+                        day_has_future_slots = True
+                        break
+                except Exception:
+                    pass
+
+            if day_has_future_slots:
+                scarcity_flag = True
+                failed_days.append(day_name)
 
     # Formulate reason
     reason_str = ""
     if scarcity_flag:
-        reason_str = "Calendar density in the week of 2026-07-02 restricted full allocation."
+        reason_str = f"Calendar density in the week of {base_date.isoformat()} restricted full allocation."
         if failed_days:
             reason_str += f" Dropped learning blocks on {', '.join(failed_days)} due to no remaining free slots in working hours."
         else:
@@ -245,12 +513,14 @@ async def stage_schedule(
         "transaction_id": transaction_id,
         "token": token,
         "proposed_events": proposed_blocks,
+        "events_to_delete": events_to_delete,
         "scarcity_flag": scarcity_flag,
         "reason": reason_str,
     }
 
     # Cache proposal state in profile for REST API access
     profile["proposed_events"] = proposed_blocks
+    profile["events_to_delete"] = events_to_delete
     profile["scarcity_flag"] = scarcity_flag
     profile["reason"] = reason_str
     profile["transaction_id"] = transaction_id
@@ -260,7 +530,7 @@ async def stage_schedule(
     # Cache the proposal in workflow context state
     ctx.state[f"proposal_{transaction_id}"] = proposal_payload
 
-    # 4. Yield RequestInput to pause backend execution and send component payload
+    # Yield RequestInput to pause backend execution and send component payload
     component_payload = {
         "component": "InteractiveVibeDiff",
         "transaction_id": transaction_id,
@@ -326,6 +596,12 @@ async def write_to_calendar(ctx: Context, node_input: Any) -> Event:
                 event["start"] = client_events[idx].get("start", event["start"])
                 event["end"] = client_events[idx].get("end", event["end"])
 
+    # Perform Google Calendar Deletions for any displaced/rescheduled events
+    events_to_delete = proposal.get("events_to_delete", [])
+    for evt in events_to_delete:
+        if evt.get("google_event_id"):
+            delete_calendar_event(evt["google_event_id"])
+
     # Execute the Calendar write operation (safe under Zero-Trust)
     write_results = []
     for block in proposal["proposed_events"]:
@@ -336,6 +612,10 @@ async def write_to_calendar(ctx: Context, node_input: Any) -> Event:
             description=block["description"],
         )
         write_results.append(result)
+        if result.get("status") == "success" and "event" in result:
+            evt_data = result["event"]
+            if evt_data.get("id"):
+                block["google_event_id"] = evt_data["id"]
 
     # Log the successfully scheduled block to work_log
     state_store.add_work_log_entry(
@@ -350,11 +630,18 @@ async def write_to_calendar(ctx: Context, node_input: Any) -> Event:
     # Update profile with scheduled events and clear active proposals
     profile = state_store.get_user_profile()
     sched_events = profile.get("scheduled_events", [])
+    
+    # Remove the deleted/displaced events from profile
+    to_delete_ids = {evt.get("id") for evt in events_to_delete if evt.get("id")}
+    sched_events = [e for e in sched_events if e.get("id") not in to_delete_ids]
+
     for block in proposal["proposed_events"]:
         if not any(e.get("start") == block.get("start") and e.get("summary") == block.get("summary") for e in sched_events):
             sched_events.append(block)
+            
     profile["scheduled_events"] = sched_events
     profile["proposed_events"] = []
+    profile["events_to_delete"] = []
     profile["scarcity_flag"] = False
     profile["reason"] = ""
     profile["transaction_id"] = None

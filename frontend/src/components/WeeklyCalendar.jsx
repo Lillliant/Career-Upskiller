@@ -1,11 +1,77 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAppState } from '../stateManager';
 
 export default function WeeklyCalendar({ onApprove, onCancel }) {
   const [state, setState] = useAppState();
+  const containerRef = useRef(null);
   const [draggedEventId, setDraggedEventId] = useState(null);
   const [draggedProposedIdx, setDraggedProposedIdx] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [contextMenu, setContextMenu] = useState(null);
+  const [hoveredEvent, setHoveredEvent] = useState(null);
+
+  useEffect(() => {
+    const closeMenu = () => setContextMenu(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, []);
+
+  const updateScheduledEventOnBackend = async (event) => {
+    try {
+      const res = await fetch(`/api/calendar/events/${event.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start: event.start,
+          end: event.end,
+          summary: event.summary,
+          description: event.description
+        })
+      });
+      if (!res.ok) {
+        console.error("Failed to update event on backend");
+      }
+    } catch (err) {
+      console.error("Error updating event on backend:", err);
+    }
+  };
+
+  const handleDeleteEvent = async (event, isProposed, proposedIdx) => {
+    if (isProposed && proposedIdx !== null) {
+      const updated = state.proposedEvents.filter((_, idx) => idx !== proposedIdx);
+      setState({ proposedEvents: updated });
+    } else {
+      if (!window.confirm(`Are you sure you want to delete "${event.summary}"?`)) return;
+      try {
+        const res = await fetch(`/api/calendar/events/${event.id}`, {
+          method: 'DELETE'
+        });
+        if (res.ok) {
+          const updated = state.calendarEvents.filter(evt => evt.id !== event.id);
+          setState({ calendarEvents: updated });
+        } else {
+          alert("Failed to delete event from calendar");
+        }
+      } catch (err) {
+        console.error("Error deleting event:", err);
+        alert("Error deleting event");
+      }
+    }
+  };
+
+  const handleEventContextMenu = (e, event, isProposed, proposedIdx) => {
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    setHoveredEvent(null);
+    
+    setContextMenu({
+      rect,
+      event,
+      isProposed,
+      proposedIdx
+    });
+  };
+
 
   // 15-minute grid setup (08:00 - 18:00)
   const startHour = 8;
@@ -123,21 +189,26 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
       setState({ proposedEvents: updated });
     } else {
       // Dragging an already scheduled block
+      let updatedEvent = null;
       const updated = state.calendarEvents.map(evt => {
         if (evt.id === draggedEventId) {
           const duration = getDurationMins(evt.start, evt.end);
           const newStart = new Date(targetDay.fullDate);
           newStart.setHours(targetHour, targetMin, 0);
           const newEnd = new Date(newStart.getTime() + duration * 60 * 1000);
-          return {
+          updatedEvent = {
             ...evt,
             start: newStart.toISOString(),
             end: newEnd.toISOString()
           };
+          return updatedEvent;
         }
         return evt;
       });
       setState({ calendarEvents: updated });
+      if (updatedEvent) {
+        updateScheduledEventOnBackend(updatedEvent);
+      }
     }
 
     setDraggedEventId(null);
@@ -157,18 +228,23 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
         setState({ proposedEvents: updated });
       }
     } else {
+      let updatedEvent = null;
       const updated = state.calendarEvents.map(evt => {
         if (evt.id === event.id) {
           const start = new Date(evt.start);
           const end = new Date(evt.end);
           const newEnd = new Date(end.getTime() + deltaMins * 60 * 1000);
           if (newEnd >= new Date(start.getTime() + 15 * 60 * 1000)) {
-            return { ...evt, end: newEnd.toISOString() };
+            updatedEvent = { ...evt, end: newEnd.toISOString() };
+            return updatedEvent;
           }
         }
         return evt;
       });
       setState({ calendarEvents: updated });
+      if (updatedEvent) {
+        updateScheduledEventOnBackend(updatedEvent);
+      }
     }
   };
 
@@ -178,6 +254,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     e.preventDefault();
     const startY = e.clientY;
     const initialEnd = new Date(event.end);
+    let latestEndISO = event.end;
 
     const handleMouseMove = (moveEvent) => {
       const deltaY = moveEvent.clientY - startY;
@@ -187,14 +264,15 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
         const start = new Date(event.start);
         const newEnd = new Date(initialEnd.getTime() + deltaMins * 60 * 1000);
         if (newEnd >= new Date(start.getTime() + 15 * 60 * 1000)) {
+          latestEndISO = newEnd.toISOString();
           if (isProposed && proposedIdx !== null) {
             const updated = [...state.proposedEvents];
-            updated[proposedIdx] = { ...updated[proposedIdx], end: newEnd.toISOString() };
+            updated[proposedIdx] = { ...updated[proposedIdx], end: latestEndISO };
             setState({ proposedEvents: updated });
           } else {
             const updated = state.calendarEvents.map(evt => {
               if (evt.id === event.id) {
-                return { ...evt, end: newEnd.toISOString() };
+                return { ...evt, end: latestEndISO };
               }
               return evt;
             });
@@ -207,6 +285,12 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     const handleMouseUp = () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
+      if (!isProposed && latestEndISO !== event.end) {
+        updateScheduledEventOnBackend({
+          ...event,
+          end: latestEndISO
+        });
+      }
     };
 
     document.addEventListener('mousemove', handleMouseMove);
@@ -263,7 +347,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
   const endOfWeekStr = weekDays[6].fullDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
   return (
-    <div style={styles.calendarPage} className="animate-fade-in">
+    <div ref={containerRef} style={styles.calendarPage} className="animate-fade-in">
       <div style={styles.header}>
         <div>
           <h2 style={styles.pageTitle}>Weekly Schedule Overview 📅</h2>
@@ -368,6 +452,23 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
                       key={evt.id || idx}
                       draggable={isLearning}
                       onDragStart={(e) => handleDragStart(e, evt.id || null, evt.isProposed ? evt.proposedIdx : null)}
+                      onContextMenu={(e) => {
+                        if (isLearning) {
+                          handleEventContextMenu(e, evt, !!evt.isProposed, evt.isProposed ? evt.proposedIdx : null);
+                        }
+                      }}
+                      onMouseEnter={(e) => {
+                        if (draggedEventId === null && draggedProposedIdx === null && !contextMenu) {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setHoveredEvent({
+                            event: evt,
+                            rect: rect
+                          });
+                        }
+                      }}
+                      onMouseLeave={() => {
+                        setHoveredEvent(null);
+                      }}
                       style={{
                         ...styles.eventCard,
                         top: `${top}px`,
@@ -440,6 +541,130 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
           })}
         </div>
       </div>
+      {contextMenu && (() => {
+        const rect = contextMenu.rect;
+        if (!rect) return null;
+        const containerRect = containerRef.current?.getBoundingClientRect() || { left: 0, top: 0, width: window.innerWidth };
+        const relativeLeft = rect.left - containerRect.left;
+        const relativeRight = rect.right - containerRect.left;
+        const relativeTop = rect.top - containerRect.top;
+
+        const menuWidth = 140;
+        const gap = 2;
+        const shouldPlaceLeft = relativeRight + gap + menuWidth > containerRect.width;
+        const left = shouldPlaceLeft 
+          ? Math.max(8, relativeLeft - menuWidth - gap) 
+          : Math.min(containerRect.width - menuWidth - 8, relativeRight + gap);
+        const top = relativeTop;
+        
+        return (
+          <div 
+            style={{
+              position: 'absolute',
+              top: `${top}px`,
+              left: `${left}px`,
+              backgroundColor: 'var(--bg-sidebar)',
+              border: '1px solid var(--border-card)',
+              borderRadius: '8px',
+              boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.4)',
+              zIndex: 1000,
+              padding: '4px',
+              display: 'flex',
+              flexDirection: 'column',
+              width: `${menuWidth}px`
+            }}
+            className="animate-fade-in"
+          >
+            <button
+              onClick={() => {
+                handleDeleteEvent(contextMenu.event, contextMenu.isProposed, contextMenu.proposedIdx);
+                setContextMenu(null);
+              }}
+              style={{
+                backgroundColor: 'transparent',
+                border: 'none',
+                color: '#fb7185',
+                padding: '8px 12px',
+                fontSize: '12px',
+                fontWeight: '600',
+                textAlign: 'left',
+                cursor: 'pointer',
+                borderRadius: '4px',
+                width: '100%',
+                transition: 'background-color 0.2s',
+              }}
+              onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(244, 63, 94, 0.1)'}
+              onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+            >
+              🗑️ Delete Event
+            </button>
+            <button
+              onClick={() => setContextMenu(null)}
+              style={{
+                backgroundColor: 'transparent',
+                border: 'none',
+                color: 'var(--color-text-muted)',
+                padding: '8px 12px',
+                fontSize: '12px',
+                textAlign: 'left',
+                cursor: 'pointer',
+                borderRadius: '4px',
+                width: '100%',
+                transition: 'background-color 0.2s',
+              }}
+              onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.05)'}
+              onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+            >
+              Cancel
+            </button>
+          </div>
+        );
+      })()}
+      {hoveredEvent && !contextMenu && (() => {
+        const rect = hoveredEvent.rect;
+        if (!rect) return null;
+        const containerRect = containerRef.current?.getBoundingClientRect() || { left: 0, top: 0, width: window.innerWidth };
+        const relativeLeft = rect.left - containerRect.left;
+        const relativeRight = rect.right - containerRect.left;
+        const relativeTop = rect.top - containerRect.top;
+
+        const tooltipWidth = 240;
+        const gap = 4;
+        const shouldPlaceLeft = relativeRight + gap + tooltipWidth > containerRect.width;
+        const left = shouldPlaceLeft 
+          ? Math.max(8, relativeLeft - tooltipWidth - gap) 
+          : Math.min(containerRect.width - tooltipWidth - 8, relativeRight + gap);
+        const top = relativeTop;
+        
+        return (
+          <div 
+            style={{
+              position: 'absolute',
+              top: `${top}px`,
+              left: `${left}px`,
+              backgroundColor: 'rgba(15, 23, 42, 0.95)',
+              backdropFilter: 'blur(8px)',
+              border: '1px solid var(--color-accent)',
+              borderRadius: '8px',
+              padding: '10px 14px',
+              color: '#ffffff',
+              fontSize: '11px',
+              width: `${tooltipWidth}px`,
+              zIndex: 2000,
+              boxShadow: '0 10px 15px -3px rgba(0,0,0,0.5)',
+              pointerEvents: 'none',
+            }}
+            className="animate-fade-in"
+          >
+            <div style={{ fontWeight: '700', marginBottom: '4px', color: 'var(--color-accent)' }}>
+              {hoveredEvent.event.summary}
+            </div>
+            <div style={{ color: '#cbd5e1', lineHeight: '1.4' }}>
+              {hoveredEvent.event.description || 'No description provided.'}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -449,6 +674,7 @@ const styles = {
     width: '100%',
     maxWidth: '1000px',
     margin: '0 auto',
+    position: 'relative',
   },
   header: {
     display: 'flex',

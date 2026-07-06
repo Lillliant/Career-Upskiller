@@ -9,6 +9,7 @@ import AnalyticsSummary from './components/AnalyticsSummary';
 
 export default function App() {
   const [state, setState] = useAppState();
+  const isFirstLoad = React.useRef(true);
 
   // Sync light/dark mode theme with document class
   React.useEffect(() => {
@@ -31,9 +32,9 @@ export default function App() {
         if (profile.available_google_calendars) {
           setState({ availableGoogleCalendars: profile.available_google_calendars });
         }
-        if (profile.career_goals) {
-          setState({
-            careerGoals: profile.career_goals,
+        if (profile.onboarded || profile.career_goals) {
+          const nextState = {
+            careerGoals: profile.career_goals || '',
             hoursPerWeek: profile.hours_per_week,
             preferredStartTime: profile.preferred_start_time || '09:00',
             preferredEndTime: profile.preferred_end_time || '17:00',
@@ -44,9 +45,20 @@ export default function App() {
             reason: profile.reason || '',
             transactionId: profile.transaction_id || '',
             token: profile.token || '',
-            onboarded: true
+            onboarded: true,
+            scheduledEvents: profile.scheduled_events || []
+          };
+          if (isFirstLoad.current) {
+            nextState.activeTab = 'schedule';
+          }
+          setState(nextState);
+        } else {
+          setState({
+            onboarded: false,
+            activeTab: 'onboarding'
           });
         }
+        isFirstLoad.current = false;
       }
       
       const resGoals = await fetch('/api/goals');
@@ -93,7 +105,7 @@ export default function App() {
       }
     };
     handleOAuthCallback();
-  }, [state.onboarded, state.currentWeekOffset]);
+  }, [state.onboarded, state.currentWeekOffset, state.activeTab]);
 
   const handleApproveHandshake = async (envelope) => {
     const logEntry = {
@@ -197,6 +209,7 @@ export default function App() {
       onboarded: false,
       goals: [],
       calendarEvents: [],
+      scheduledEvents: [],
       logs: [],
       activeTab: 'onboarding'
     });

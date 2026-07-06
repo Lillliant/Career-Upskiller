@@ -36,6 +36,7 @@ class AppStateStore {
       reason: '',
       isSubmitted: false,
       calendarEvents: [],
+      scheduledEvents: [],
 
       // Conversational Goal Builder chat logs
       builderMessages: [

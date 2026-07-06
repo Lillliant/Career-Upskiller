@@ -46,6 +46,7 @@ class ProfileUpdate(BaseModel):
     study_days: list[str] | None = None
     target_calendars: list[dict[str, Any]] | None = None
     available_google_calendars: list[dict[str, Any]] | None = None
+    onboarded: bool | None = None
 
 class GoalCreate(BaseModel):
     title: str
@@ -222,15 +223,92 @@ def get_calendar_events(offset: int = 0):
     start_iso = datetime.datetime.combine(start_of_week, datetime.time.min).isoformat() + "Z"
     end_iso = datetime.datetime.combine(end_of_week, datetime.time.max).isoformat() + "Z"
 
+    # Pre-fetch scheduled upskilling blocks (from profile or work_log) to match and de-duplicate
+    scheduled_blocks = profile.get("scheduled_events", [])
+    # Filter out pending deletions
+    to_delete = {e.get("id") for e in profile.get("events_to_delete", []) if e.get("id")}
+    scheduled_blocks = [b for b in scheduled_blocks if b.get("id") not in to_delete]
+
+    # Also fetch from work_log as fallback/sync
+    logs = state_store.get_work_log()
+    for log in logs:
+        if log.get("action") == "scheduled" and log.get("events"):
+            for evt in log["events"]:
+                if evt.get("id") not in to_delete:
+                    if not any(e.get("start") == evt.get("start") and e.get("summary") == evt.get("summary") for e in scheduled_blocks):
+                        scheduled_blocks.append(evt)
+
+    # Sets/dicts to track scheduled upskilling blocks found in Google Calendar
+    found_block_ids = set()
+    found_block_keys = set()
+
+    # We will map each Google Calendar event to its matched block if any
+    matched_events = {}
+
     # 1. Fetch external meetings (read-only/display) from Google Calendar or Mock Calendar
     target_calendars = profile.get("target_calendars", [])
     google_selected = any(c.get("selected") and c.get("type") == "google" for c in target_calendars)
 
     if google_selected:
         mcp_events = get_calendar_free_busy(start_iso, end_iso)
-        for evt in mcp_events:
-            # Check if this event was returned from mock data (starts on 2026-07-02 week but offset != 0)
+        mcp_events_indexed = list(enumerate(mcp_events))
+
+        # Pass 1: Exact match by Google Event ID or exact start time + summary
+        for idx, evt in mcp_events_indexed:
+            for block in scheduled_blocks:
+                if block.get("id") in found_block_ids or (block.get("start"), block.get("summary")) in found_block_keys:
+                    continue
+                
+                # Match by Google Event ID
+                if evt.get("id") and block.get("google_event_id") == evt.get("id"):
+                    matched_events[idx] = block
+                    found_block_ids.add(block.get("id"))
+                    found_block_keys.add((block.get("start"), block.get("summary")))
+                    break
+                
+                # Match by exact start time and summary
+                if block.get("start") == evt.get("start") and block.get("summary") == evt.get("summary"):
+                    matched_events[idx] = block
+                    if block.get("id"):
+                        found_block_ids.add(block.get("id"))
+                    found_block_keys.add((block.get("start"), block.get("summary")))
+                    break
+
+        # Pass 2: Fuzzy match by same day and summary for remaining unmatched learning events
+        for idx, evt in mcp_events_indexed:
+            if idx in matched_events:
+                continue
+                
+            evt_summary = evt.get("summary", "")
+            if not (evt_summary.startswith("Learning:") or evt_summary.startswith("Micro-learning:")):
+                continue
+                
+            for block in scheduled_blocks:
+                if block.get("id") in found_block_ids or (block.get("start"), block.get("summary")) in found_block_keys:
+                    continue
+                    
+                if block.get("summary") == evt_summary:
+                    # Check if same day
+                    evt_date = evt.get("start", "")[:10]
+                    block_date = block.get("start", "")[:10]
+                    if evt_date and block_date and evt_date == block_date:
+                        matched_events[idx] = block
+                        if block.get("id"):
+                            found_block_ids.add(block.get("id"))
+                        found_block_keys.add((block.get("start"), block.get("summary")))
+                        break
+
+        # Process and append events
+        for idx, evt in mcp_events_indexed:
             is_mock_fallback = evt.get("start", "").startswith("2026-07-02") and offset != 0
+            matched_block = matched_events.get(idx)
+
+            evt_summary = evt.get("summary", "Busy")
+            is_learning_type = (
+                matched_block is not None or 
+                evt_summary.startswith("Learning:") or 
+                evt_summary.startswith("Micro-learning:")
+            )
 
             if is_mock_fallback:
                 try:
@@ -245,27 +323,33 @@ def get_calendar_events(offset: int = 0):
                     new_end = datetime.datetime.combine(new_start_date, orig_end.time()).isoformat() + "-04:00"
 
                     events.append({
-                        "summary": evt.get("summary", "Busy"),
+                        "id": matched_block.get("id") if matched_block else evt.get("id"),
+                        "summary": evt_summary,
                         "start": new_start,
                         "end": new_end,
-                        "type": "external",
-                        "color": "#475569" # Gray for external read-only
+                        "description": matched_block.get("description") if matched_block else evt.get("description"),
+                        "type": "learning" if is_learning_type else "external",
+                        "color": "#6366f1" if is_learning_type else "#475569"
                     })
                 except Exception:
                     events.append({
-                        "summary": evt.get("summary", "Busy"),
+                        "id": matched_block.get("id") if matched_block else evt.get("id"),
+                        "summary": evt_summary,
                         "start": evt.get("start"),
                         "end": evt.get("end"),
-                        "type": "external",
-                        "color": "#475569"
+                        "description": matched_block.get("description") if matched_block else evt.get("description"),
+                        "type": "learning" if is_learning_type else "external",
+                        "color": "#6366f1" if is_learning_type else "#475569"
                     })
             else:
                 events.append({
-                    "summary": evt.get("summary", "Busy"),
+                    "id": matched_block.get("id") if matched_block else evt.get("id"),
+                    "summary": evt_summary,
                     "start": evt.get("start"),
                     "end": evt.get("end"),
-                    "type": "external",
-                    "color": "#475569"
+                    "description": matched_block.get("description") if matched_block else evt.get("description"),
+                    "type": "learning" if is_learning_type else "external",
+                    "color": "#6366f1" if is_learning_type else "#475569"
                 })
 
     # 2. Fetch external iCal subscription events
@@ -290,17 +374,15 @@ def get_calendar_events(offset: int = 0):
                     except Exception:
                         pass
 
-    # 3. Fetch scheduled upskilling blocks (from profile or work_log)
-    scheduled_blocks = profile.get("scheduled_events", [])
-    # Also fetch from work_log as fallback/sync
-    logs = state_store.get_work_log()
-    for log in logs:
-        if log.get("action") == "scheduled" and log.get("events"):
-            for evt in log["events"]:
-                if not any(e.get("start") == evt.get("start") and e.get("summary") == evt.get("summary") for e in scheduled_blocks):
-                    scheduled_blocks.append(evt)
-
+    # 3. Add scheduled upskilling blocks that were NOT matched/handled via Google Calendar
     for block in scheduled_blocks:
+        if block.get("google_event_id") in found_block_ids:
+            continue
+        if block.get("id") in found_block_ids:
+            continue
+        if (block.get("start"), block.get("summary")) in found_block_keys:
+            continue
+
         block_start_str = block.get("start")
         if block_start_str:
             try:
@@ -328,6 +410,92 @@ def get_calendar_events(offset: int = 0):
                 })
 
     return events
+
+class CalendarEventUpdate(BaseModel):
+    start: str
+    end: str
+    summary: str | None = None
+    description: str | None = None
+
+@app.put("/api/calendar/events/{event_id}")
+def update_calendar_event_endpoint(event_id: str, payload: CalendarEventUpdate):
+    profile = state_store.get_user_profile()
+    scheduled_events = profile.get("scheduled_events", [])
+    
+    # Find the local event
+    event_to_update = None
+    for evt in scheduled_events:
+        if evt.get("id") == event_id:
+            event_to_update = evt
+            break
+            
+    if not event_to_update:
+        # Check if the event_id matches google_event_id as fallback
+        for evt in scheduled_events:
+            if evt.get("google_event_id") == event_id:
+                event_to_update = evt
+                break
+
+    if not event_to_update:
+        raise HTTPException(status_code=404, detail="Scheduled event not found")
+
+    # Update local values
+    event_to_update["start"] = payload.start
+    event_to_update["end"] = payload.end
+    if payload.summary is not None:
+        event_to_update["summary"] = payload.summary
+    if payload.description is not None:
+        event_to_update["description"] = payload.description
+
+    # Sync to external Google Calendar if mapped
+    from app.mcp_clients import update_calendar_event
+    google_event_id = event_to_update.get("google_event_id")
+    google_status = None
+    if google_event_id:
+        google_status = update_calendar_event(
+            google_event_id=google_event_id,
+            start_time=payload.start,
+            end_time=payload.end,
+            summary=payload.summary,
+            description=payload.description
+        )
+
+    # Save to profile
+    state_store.update_user_profile(profile)
+    return {"status": "success", "event": event_to_update, "google_status": google_status}
+
+@app.delete("/api/calendar/events/{event_id}")
+def delete_calendar_event_endpoint(event_id: str):
+    profile = state_store.get_user_profile()
+    scheduled_events = profile.get("scheduled_events", [])
+    
+    # Find the local event to get the google_event_id
+    event_to_delete = None
+    for evt in scheduled_events:
+        if evt.get("id") == event_id:
+            event_to_delete = evt
+            break
+            
+    if not event_to_delete:
+        # Check by google_event_id as fallback
+        for evt in scheduled_events:
+            if evt.get("google_event_id") == event_id:
+                event_to_delete = evt
+                break
+
+    if not event_to_delete:
+        raise HTTPException(status_code=404, detail="Scheduled event not found")
+
+    google_event_id = event_to_delete.get("google_event_id")
+    google_status = None
+    if google_event_id:
+        from app.mcp_clients import delete_calendar_event
+        google_status = delete_calendar_event(google_event_id)
+
+    # Remove from scheduled_events
+    profile["scheduled_events"] = [evt for evt in scheduled_events if evt.get("id") != event_to_delete.get("id")]
+    state_store.update_user_profile(profile)
+    return {"status": "success", "google_status": google_status}
 
 @app.get("/api/auth/google/login")
 def google_login_url():
@@ -517,6 +685,7 @@ def chat_goals(request: ChatRequest):
 
     first_query = user_msgs[0].text
     last_query = user_msgs[-1].text
+    today_str = datetime.date.today().isoformat()
 
     # 1. Attempt to call Gemini Client (Vertex / Gen AI fallback)
     try:
@@ -530,24 +699,36 @@ def chat_goals(request: ChatRequest):
             client = Client(vertexai=True)
 
         if client:
-            system_instruction = """
+            system_instruction = f"""
             You are the Career Skill Concierge, an expert career counselor and tutor.
-            Your role is to help the user discover their skill goals and design weekly portfolio projects.
+            Your role is to help the user discover their skill goals and design weekly portfolio projects with a structured learning map consisting of Milestones -> Tasks.
+            Today's current date is {today_str}. Please space out the tasks and milestones starting from this date.
 
             Rules:
             1. If this is the FIRST message from the user (i.e. the history contains only 1 user query), you MUST ask 2-3 follow-up questions to understand their current familiarity level (beginner, intermediate, advanced) and their preference for conceptual study vs hands-on building. Do NOT recommend a structured goal block yet.
             2. If the history has 2 or more user messages, summarize their goal, and output a friendly concluding message. At the end of your response, you MUST output a structured JSON upskilling goal object inside markdown code fences (` ```json `), with the following fields:
                - title: Str (the title of the customized goal/project)
                - description: Str (brief project overview)
-               - sub_projects: List of Dicts, where each dict has "title" (Str), "completed" (Bool, default False), "dueDate" (Str, YYYY-MM-DD)
-               - skills: List of Dicts, where each dict has "name" (Str), "category" (Str), "career_application" (Str)
+               - sub_projects: List of Dicts (Milestones), where each dict has:
+                 - title: Str (e.g. "Milestone 1: JavaScript Foundations")
+                 - description: Str (Milestone description, e.g. "Understand how to write basic instructions and control the flow of a program.")
+                 - dueDate: Str (YYYY-MM-DD)
+                 - completed: Bool (default False)
+                 - tasks: List of Dicts, where each dict has:
+                   - title: Str (e.g. "Variables and Data Types")
+                   - description: Str (Task description, e.g. "Learn how to store data using let, const, and var. Understand primitive types like strings, numbers, and booleans.")
+                   - estimated_time: Str (e.g. "2 hours")
+                   - resource: Str (e.g. "The 'JavaScript First Steps' module on MDN Web Docs.")
+                   - dueDate: Str (YYYY-MM-DD)
+                   - completed: Bool (default False)
+               - skills: List of Dicts, where each dict has "name" (Str), "category" (Str)
             """
 
             contents = []
             for msg in request.messages:
                 contents.append(types.Content(
-                    role="user" if msg.role == "user" else "model",
-                    parts=[types.Part.from_text(text=msg.text)]
+                     role="user" if msg.role == "user" else "model",
+                     parts=[types.Part.from_text(text=msg.text)]
                 ))
 
             response = client.models.generate_content(
@@ -566,6 +747,13 @@ def chat_goals(request: ChatRequest):
                     parts = response_text.split("```json")
                     json_str = parts[1].split("```")[0].strip()
                     suggested_goal = json.loads(json_str)
+                    if suggested_goal and "sub_projects" in suggested_goal:
+                        from app.state_store import adjust_past_due_dates, pace_and_schedule_goals, state_store
+                        suggested_goal["sub_projects"] = adjust_past_due_dates(suggested_goal["sub_projects"])
+                        profile = state_store.get_user_profile()
+                        profile["goals"] = [suggested_goal]
+                        profile = pace_and_schedule_goals(profile)
+                        suggested_goal = profile["goals"][0]
                     response_text = parts[0].strip() + "\n\n" + (parts[1].split("```")[1] if len(parts[1].split("```")) > 1 else "").strip()
                 except Exception:
                     pass
@@ -593,13 +781,58 @@ def chat_goals(request: ChatRequest):
                 "title": "Master DAG Orchestration & MCP",
                 "description": "Learn Google ADK agent modeling and tool callbacks.",
                 "sub_projects": [
-                    {"title": "Define a 3-node workflow edge mapping", "completed": False, "dueDate": "2026-07-04"},
-                    {"title": "Build a stdio transport server client", "completed": False, "dueDate": "2026-07-06"},
-                    {"title": "Implement Zero-Trust signature checks", "completed": False, "dueDate": "2026-07-09"}
+                    {
+                        "title": "Milestone 1: Google ADK Basics",
+                        "description": "Establish a basic foundation in Google's Agent Development Kit (ADK).",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=2)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Define a 3-node workflow edge mapping",
+                                "description": "Configure nodes, routing conditions, and edge relations within the DAG.",
+                                "estimated_time": "2 hours",
+                                "resource": "Google Agents CLI ADK Code Skill guide",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=1)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    },
+                    {
+                        "title": "Milestone 2: MCP Integration",
+                        "description": "Connect agents with Model Context Protocol servers.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=4)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Build a stdio transport server client",
+                                "description": "Implement stdio-based transport client to interact with external tools.",
+                                "estimated_time": "3 hours",
+                                "resource": "Model Context Protocol specification docs",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=3)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    },
+                    {
+                        "title": "Milestone 3: Advanced Security",
+                        "description": "Implement security layer on top of agent routing and execution.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=6)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Implement Zero-Trust signature checks",
+                                "description": "Verify cryptographic signatures before invoking backend tool executions.",
+                                "estimated_time": "4 hours",
+                                "resource": "Zero-Trust Architecture Guidelines on OWASP",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=5)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    }
                 ],
                 "skills": [
-                    {"name": "DAG Orchestration", "category": "AI Engineering", "career_application": "AI Architect"},
-                    {"name": "Model Context Protocol (MCP)", "category": "AI Engineering", "career_application": "AI Developer"}
+                    {"name": "DAG Orchestration", "category": "AI Engineering"},
+                    {"name": "Model Context Protocol (MCP)", "category": "AI Engineering"}
                 ]
             }
         elif "mlops" in lower_first or "cloud" in lower_first:
@@ -608,13 +841,58 @@ def chat_goals(request: ChatRequest):
                 "title": "Automate ML Deployment with Cloud GKE",
                 "description": "Deploy models on GKE and configure automated CI/CD logs.",
                 "sub_projects": [
-                    {"title": "Draft a Dockerfile for model endpoint", "completed": False, "dueDate": "2026-07-04"},
-                    {"title": "Configure Kubernetes staging manifest", "completed": False, "dueDate": "2026-07-07"},
-                    {"title": "Setup GitHub Actions trigger on push", "completed": False, "dueDate": "2026-07-10"}
+                    {
+                        "title": "Milestone 1: Containerization Foundations",
+                        "description": "Understand how to package machine learning applications.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=2)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Draft a Dockerfile for model endpoint",
+                                "description": "Build a Docker container hosting a prediction API with FastAPI.",
+                                "estimated_time": "2 hours",
+                                "resource": "Official Docker Engine guide",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=1)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    },
+                    {
+                        "title": "Milestone 2: Kubernetes Orchestration",
+                        "description": "Deploy containerized models onto Google Kubernetes Engine.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=4)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Configure Kubernetes staging manifest",
+                                "description": "Write deployment and service configurations for the endpoint.",
+                                "estimated_time": "3 hours",
+                                "resource": "Kubernetes Deployment interactive tutorials",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=3)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    },
+                    {
+                        "title": "Milestone 3: Automated CI/CD Pipelines",
+                        "description": "Establish continuous deployment pipeline using GitHub Actions.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=6)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Setup GitHub Actions trigger on push",
+                                "description": "Write a workflow yaml file that runs checks and deploys on git push.",
+                                "estimated_time": "4 hours",
+                                "resource": "GitHub Actions workflow syntax docs",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=5)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    }
                 ],
                 "skills": [
-                    {"name": "GKE Automation", "category": "MLOps", "career_application": "MLOps Engineer"},
-                    {"name": "Docker Containerization", "category": "DevOps", "career_application": "Cloud Developer"}
+                    {"name": "GKE Automation", "category": "MLOps"},
+                    {"name": "Docker Containerization", "category": "DevOps"}
                 ]
             }
         else:
@@ -623,14 +901,67 @@ def chat_goals(request: ChatRequest):
                 "title": f"Master {first_query} Fundamentals",
                 "description": f"Hands-on projects and milestones to develop competencies in {first_query}.",
                 "sub_projects": [
-                    {"title": "Research core syntax and references", "completed": False, "dueDate": "2026-07-04"},
-                    {"title": "Create a simple CLI prototype application", "completed": False, "dueDate": "2026-07-07"},
-                    {"title": "Deploy demo to cloud staging server", "completed": False, "dueDate": "2026-07-10"}
+                    {
+                        "title": "Milestone 1: Core Syntax",
+                        "description": f"Understand core concepts of {first_query}.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=2)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Research core syntax and references",
+                                "description": "Explore the official syntax guide and compile reference sheets.",
+                                "estimated_time": "2 hours",
+                                "resource": "Official documentation quickstarts",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=1)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    },
+                    {
+                        "title": "Milestone 2: Application Prototype",
+                        "description": "Build a CLI or simple GUI prototype using the concepts.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=4)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Create a simple CLI prototype application",
+                                "description": "Design user controls, simple database/file backend storage.",
+                                "estimated_time": "3 hours",
+                                "resource": "Learn Python/JS standard library guides",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=3)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    },
+                    {
+                        "title": "Milestone 3: Deployment",
+                        "description": "Publish the prototype to a cloud staging environment.",
+                        "dueDate": (datetime.date.today() + datetime.timedelta(days=6)).isoformat(),
+                        "completed": False,
+                        "tasks": [
+                            {
+                                "title": "Deploy demo to cloud staging server",
+                                "description": "Use Vercel, Heroku, or GCP Cloud Run for deployment.",
+                                "estimated_time": "2 hours",
+                                "resource": "Vercel or Cloud Run deployment guides",
+                                "dueDate": (datetime.date.today() + datetime.timedelta(days=5)).isoformat(),
+                                "completed": False
+                            }
+                        ]
+                    }
                 ],
                 "skills": [
-                    {"name": f"{first_query} Core", "category": "General Development", "career_application": "Software Engineer"}
+                    {"name": f"{first_query} Core", "category": "General Development"}
                 ]
             }
+
+        if suggestion and "sub_projects" in suggestion:
+            from app.state_store import adjust_past_due_dates, pace_and_schedule_goals, state_store
+            suggestion["sub_projects"] = adjust_past_due_dates(suggestion["sub_projects"])
+            profile = state_store.get_user_profile()
+            profile["goals"] = [suggestion]
+            profile = pace_and_schedule_goals(profile)
+            suggestion = profile["goals"][0]
 
         return {
             "text": reply,

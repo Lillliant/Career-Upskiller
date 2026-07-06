@@ -287,8 +287,8 @@ def test_create_goal_with_skills(server_fixture: subprocess.Popen[str]) -> None:
             {"title": "Define a 3-node workflow edge mapping", "completed": False, "dueDate": "2026-07-04"},
         ],
         "skills": [
-            {"name": "DAG Orchestration", "category": "AI Engineering", "career_application": "AI Architect"},
-            {"name": "Model Context Protocol (MCP)", "category": "AI Engineering", "career_application": "AI Developer"}
+            {"name": "DAG Orchestration", "category": "AI Engineering"},
+            {"name": "Model Context Protocol (MCP)", "category": "AI Engineering"}
         ]
     }
 
@@ -307,9 +307,9 @@ def test_create_goal_with_skills(server_fixture: subprocess.Popen[str]) -> None:
     # 3. Test updating goal skills
     goal_id = new_goal["id"]
     updated_skills = [
-        {"name": "DAG Orchestration", "category": "AI Engineering", "career_application": "AI Architect"},
-        {"name": "Model Context Protocol (MCP)", "category": "AI Engineering", "career_application": "AI Developer"},
-        {"name": "Advanced Python", "category": "General", "career_application": "Senior Engineer"}
+        {"name": "DAG Orchestration", "category": "AI Engineering"},
+        {"name": "Model Context Protocol (MCP)", "category": "AI Engineering"},
+        {"name": "Advanced Python", "category": "General"}
     ]
     update_resp = requests.put(
         f"{BASE_URL}/api/goals/{goal_id}",
@@ -323,6 +323,81 @@ def test_create_goal_with_skills(server_fixture: subprocess.Popen[str]) -> None:
     updated_goal = updated_goals[0]
     assert len(updated_goal["skills"]) == 3
     assert updated_goal["skills"][2]["name"] == "Advanced Python"
+
+
+def test_create_goal_and_re_stage_schedule(server_fixture: subprocess.Popen[str]) -> None:
+    """
+    Test that creating a goal and triggering staging on the backend
+    correctly generates proposed events that are saved in the user profile.
+    """
+    # 1. Reset first
+    requests.post(f"{BASE_URL}/api/reset", headers=HEADERS, timeout=10)
+
+    # 2. Update profile onboarding preferences first
+    profile_data = {
+        "career_goals": "AI Engineer",
+        "hours_per_week": 5,
+        "study_days": ["Monday", "Wednesday", "Friday"],
+    }
+    profile_resp = requests.post(
+        f"{BASE_URL}/api/profile", json=profile_data, headers=HEADERS, timeout=10
+    )
+    assert profile_resp.status_code == 200
+
+    # 3. Create goal
+    goal_data = {
+        "title": "Master LangChain and ADK",
+        "description": "Learn agents development",
+        "status": "to-do",
+    }
+    create_resp = requests.post(
+        f"{BASE_URL}/api/goals", json=goal_data, headers=HEADERS, timeout=10
+    )
+    assert create_resp.status_code == 200
+
+    # 4. Trigger schedule staging via /run (similar to frontend trigger)
+    # First create session
+    user_id = "test_user_123"
+    session_url = f"{BASE_URL}/apps/app/users/{user_id}/sessions"
+    session_response = requests.post(
+        session_url,
+        headers=HEADERS,
+        json={"state": {}},
+        timeout=60,
+    )
+    assert session_response.status_code == 200
+    session_id = session_response.json()["id"]
+
+    run_payload = {
+        "app_name": "app",
+        "user_id": user_id,
+        "session_id": session_id,
+        "new_message": {
+            "role": "user",
+            "parts": [{"text": "Re-stage schedule with new goals."}],
+        },
+    }
+    run_resp = requests.post(
+        f"{BASE_URL}/run", json=run_payload, headers=HEADERS, timeout=60
+    )
+    assert run_resp.status_code == 200
+
+    # 5. Fetch profile and verify that proposed_events are populated
+    get_profile_resp = requests.get(f"{BASE_URL}/api/profile", timeout=10)
+    assert get_profile_resp.status_code == 200
+    profile = get_profile_resp.json()
+    
+    # Verify that proposed_events is list and contains elements
+    assert "proposed_events" in profile
+    assert isinstance(profile["proposed_events"], list)
+    assert len(profile["proposed_events"]) > 0
+    
+    # Verify transaction metadata exists
+    assert "transaction_id" in profile
+    assert profile["transaction_id"] is not None
+    assert "token" in profile
+    assert profile["token"] is not None
+
 
 
 
