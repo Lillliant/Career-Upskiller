@@ -5,7 +5,7 @@ from app.state_store import state_store
 
 
 def onboarding_interview(
-    user_id: str, career_goals: str, hours_per_week: int, excluded_days: list[str]
+    user_id: str, career_goals: str, hours_per_week: int, study_days: list[str]
 ) -> dict[str, Any]:
     """Interviews the user to define their career goals and time availability,
     queries Search MCP for market trends, and compiles a personalized strategy.
@@ -38,7 +38,7 @@ def onboarding_interview(
     strategy = {
         "career_goals": career_goals,
         "hours_per_week": hours_per_week,
-        "excluded_days": excluded_days,
+        "study_days": study_days,
         "market_insights": market_insights,
         "suggested_focus_areas": suggested_focus_areas,
         "created_at": "2026-07-02T01:43:00Z",

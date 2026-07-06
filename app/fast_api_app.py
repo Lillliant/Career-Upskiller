@@ -11,50 +11,62 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import datetime
 import os
+from typing import Any
 
 import google.auth
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from google.adk.cli.fast_api import get_fast_api_app
 from google.cloud import logging as google_cloud_logging
+from pydantic import BaseModel
+
+from app.app_utils.ical_parser import parse_ical
+from app.app_utils.project_resolver import setup_gcp_environment
+
+# Initialize project and quota environment variables dynamically
+try:
+    setup_gcp_environment()
+except Exception:
+    pass
 
 from app.app_utils.telemetry import setup_telemetry
 from app.app_utils.typing import Feedback
-from pydantic import BaseModel
-from typing import Any, Optional
-from fastapi import HTTPException
-from app.state_store import state_store
-from app.app_utils.ical_parser import parse_ical
 from app.mcp_clients import get_calendar_free_busy
 from app.skills.reflection_loop import process_user_reflection
+from app.state_store import state_store
+
 
 # Request schemas for new endpoints
 class ProfileUpdate(BaseModel):
-    career_goals: Optional[str] = None
-    hours_per_week: Optional[int] = None
-    preferred_start_time: Optional[str] = None
-    preferred_end_time: Optional[str] = None
-    excluded_days: Optional[list[str]] = None
-    target_calendars: Optional[list[dict[str, Any]]] = None
+    career_goals: str | None = None
+    hours_per_week: int | None = None
+    preferred_start_time: str | None = None
+    preferred_end_time: str | None = None
+    study_days: list[str] | None = None
+    target_calendars: list[dict[str, Any]] | None = None
+    available_google_calendars: list[dict[str, Any]] | None = None
 
 class GoalCreate(BaseModel):
     title: str
-    description: Optional[str] = ""
-    status: Optional[str] = "to-do"
-    sub_projects: Optional[list[dict[str, Any]]] = None
+    description: str | None = ""
+    status: str | None = "to-do"
+    sub_projects: list[dict[str, Any]] | None = None
+    skills: list[dict[str, Any]] | None = None
 
 class GoalUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-    sub_projects: Optional[list[dict[str, Any]]] = None
-    time_spent_mins: Optional[int] = None
-    conversations: Optional[list[dict[str, Any]]] = None
+    title: str | None = None
+    description: str | None = None
+    status: str | None = None
+    sub_projects: list[dict[str, Any]] | None = None
+    skills: list[dict[str, Any]] | None = None
+    time_spent_mins: int | None = None
+    conversations: list[dict[str, Any]] | None = None
 
 class ReflectionSubmit(BaseModel):
-    learning_block_id: Optional[str] = "generic"
+    learning_block_id: str | None = "generic"
     reflection_text: str
-    success_rating: int  # 1-5
+    success_rating: int | None = None
 
 setup_telemetry()
 
@@ -107,6 +119,8 @@ logger = None
 
 try:
     _, project_id = google.auth.default()
+    if not project_id:
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
     logging_client = google_cloud_logging.Client()
     gcp_logger = logging_client.logger(__name__)
     logger = LoggerWrapper(gcp_logger=gcp_logger)
@@ -118,13 +132,18 @@ except Exception as e:
     logger.warning(f"Google Cloud credentials or Logging client not available. Operating in resilient local mode. Details: {e}")
 
 allow_origins = (
-    os.getenv("ALLOW_ORIGINS", "").split(",") if os.getenv("ALLOW_ORIGINS") else None
+    os.getenv("ALLOW_ORIGINS", "").split(",")
+    if os.getenv("ALLOW_ORIGINS")
+    else ["http://localhost:5173", "http://127.0.0.1:5173"]
 )
 
 # Artifact bucket for ADK (created by Terraform, passed via env var)
 logs_bucket_name = os.environ.get("LOGS_BUCKET_NAME")
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Set default app name for ADK endpoints
+os.environ["ADK_DEFAULT_APP_NAME"] = "app"
+
 # In-memory session configuration - no persistent storage
 session_service_uri = None
 
@@ -137,6 +156,7 @@ app: FastAPI = get_fast_api_app(
     allow_origins=allow_origins,
     session_service_uri=session_service_uri,
     otel_to_cloud=True,
+    auto_create_session=True,
 )
 app.title = "career-upskiller"
 app.description = "API for interacting with the Agent career-upskiller"
@@ -161,6 +181,8 @@ def create_goal(goal: GoalCreate):
     goal_dict = goal.model_dump()
     if not goal_dict.get("sub_projects"):
         goal_dict["sub_projects"] = []
+    if not goal_dict.get("skills"):
+        goal_dict["skills"] = []
     goal_dict["time_spent_mins"] = 0
     goal_dict["conversations"] = []
     state_store.create_goal(goal_dict)
@@ -181,41 +203,93 @@ def delete_goal(goal_id: str):
     state_store.update_user_profile(profile)
     return {"status": "success", "goals": state_store.get_goals()}
 
+@app.post("/api/reset")
+def reset_state():
+    state_store.reset()
+    return {"status": "success", "message": "State store has been reset."}
+
 @app.get("/api/calendar/events")
-def get_calendar_events():
+def get_calendar_events(offset: int = 0):
     profile = state_store.get_user_profile()
     events = []
-    
+
+    # Calculate date range for offset week
+    # Thursday July 2, 2026 is the base date
+    base_date = datetime.date(2026, 7, 2)
+    start_of_week = base_date + datetime.timedelta(days=offset * 7)
+    end_of_week = start_of_week + datetime.timedelta(days=7)
+
+    start_iso = datetime.datetime.combine(start_of_week, datetime.time.min).isoformat() + "Z"
+    end_iso = datetime.datetime.combine(end_of_week, datetime.time.max).isoformat() + "Z"
+
     # 1. Fetch external meetings (read-only/display) from Google Calendar or Mock Calendar
-    # Respect isolation: only pull if the calendar is selected and NOT isolated
     target_calendars = profile.get("target_calendars", [])
-    google_allowed = any(c.get("id") == "cal-work" and c.get("selected") for c in target_calendars)
-    
-    if google_allowed:
-        # Load mock events
-        mcp_events = get_calendar_free_busy("2026-07-02T00:00:00Z", "2026-07-02T23:59:59Z")
+    google_selected = any(c.get("selected") and c.get("type") == "google" for c in target_calendars)
+
+    if google_selected:
+        mcp_events = get_calendar_free_busy(start_iso, end_iso)
         for evt in mcp_events:
-            events.append({
-                "summary": evt.get("summary", "Busy"),
-                "start": evt.get("start"),
-                "end": evt.get("end"),
-                "type": "external",
-                "color": "#475569" # Gray for external read-only
-            })
-            
-    # 2. Fetch external iCal subscription events
-    for cal in target_calendars:
-        if cal.get("selected") and cal.get("type") == "ical" and cal.get("url"):
-            ical_events = parse_ical(cal["url"])
-            for evt in ical_events:
+            # Check if this event was returned from mock data (starts on 2026-07-02 week but offset != 0)
+            is_mock_fallback = evt.get("start", "").startswith("2026-07-02") and offset != 0
+
+            if is_mock_fallback:
+                try:
+                    # Format: YYYY-MM-DDTHH:MM:SS-04:00
+                    orig_start = datetime.datetime.fromisoformat(evt.get("start"))
+                    # Days diff from 2026-07-02
+                    days_diff = (orig_start.date() - datetime.date(2026, 7, 2)).days
+                    new_start_date = start_of_week + datetime.timedelta(days=days_diff)
+
+                    new_start = datetime.datetime.combine(new_start_date, orig_start.time()).isoformat() + "-04:00"
+                    orig_end = datetime.datetime.fromisoformat(evt.get("end"))
+                    new_end = datetime.datetime.combine(new_start_date, orig_end.time()).isoformat() + "-04:00"
+
+                    events.append({
+                        "summary": evt.get("summary", "Busy"),
+                        "start": new_start,
+                        "end": new_end,
+                        "type": "external",
+                        "color": "#475569" # Gray for external read-only
+                    })
+                except Exception:
+                    events.append({
+                        "summary": evt.get("summary", "Busy"),
+                        "start": evt.get("start"),
+                        "end": evt.get("end"),
+                        "type": "external",
+                        "color": "#475569"
+                    })
+            else:
                 events.append({
-                    "summary": evt.get("summary", "iCal Event"),
+                    "summary": evt.get("summary", "Busy"),
                     "start": evt.get("start"),
                     "end": evt.get("end"),
                     "type": "external",
                     "color": "#475569"
                 })
-                
+
+    # 2. Fetch external iCal subscription events
+    for cal in target_calendars:
+        if cal.get("selected") and cal.get("type") == "ical" and cal.get("url"):
+            ical_events = parse_ical(cal["url"])
+            for evt in ical_events:
+                evt_start_str = evt.get("start")
+                if evt_start_str:
+                    try:
+                        # Normalize format to parse timezone
+                        normalized = evt_start_str.replace("Z", "+00:00")
+                        evt_start = datetime.datetime.fromisoformat(normalized).date()
+                        if start_of_week <= evt_start < end_of_week:
+                            events.append({
+                                "summary": evt.get("summary", "iCal Event"),
+                                "start": evt.get("start"),
+                                "end": evt.get("end"),
+                                "type": "external",
+                                "color": "#475569"
+                            })
+                    except Exception:
+                        pass
+
     # 3. Fetch scheduled upskilling blocks (from profile or work_log)
     scheduled_blocks = profile.get("scheduled_events", [])
     # Also fetch from work_log as fallback/sync
@@ -225,33 +299,159 @@ def get_calendar_events():
             for evt in log["events"]:
                 if not any(e.get("start") == evt.get("start") and e.get("summary") == evt.get("summary") for e in scheduled_blocks):
                     scheduled_blocks.append(evt)
-                    
+
     for block in scheduled_blocks:
-        events.append({
-            "id": block.get("id"),
-            "summary": block.get("summary"),
-            "start": block.get("start"),
-            "end": block.get("end"),
-            "description": block.get("description"),
-            "type": "learning",
-            "color": "#6366f1" # Indigo/violet for learning blocks
-        })
-        
+        block_start_str = block.get("start")
+        if block_start_str:
+            try:
+                normalized = block_start_str.replace("Z", "+00:00")
+                block_date = datetime.datetime.fromisoformat(normalized).date()
+                if start_of_week <= block_date < end_of_week:
+                    events.append({
+                        "id": block.get("id"),
+                        "summary": block.get("summary"),
+                        "start": block.get("start"),
+                        "end": block.get("end"),
+                        "description": block.get("description"),
+                        "type": "learning",
+                        "color": "#6366f1" # Indigo/violet for learning blocks
+                    })
+            except Exception:
+                events.append({
+                    "id": block.get("id"),
+                    "summary": block.get("summary"),
+                    "start": block.get("start"),
+                    "end": block.get("end"),
+                    "description": block.get("description"),
+                    "type": "learning",
+                    "color": "#6366f1"
+                })
+
     return events
+
+@app.get("/api/auth/google/login")
+def google_login_url():
+    import urllib.parse
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not client_id:
+        return {"status": "error", "message": "GOOGLE_CLIENT_ID not configured in environment."}
+
+    redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5173/oauth-callback")
+    scope = "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly"
+
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={urllib.parse.quote(client_id)}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        "&response_type=code"
+        f"&scope={urllib.parse.quote(scope)}"
+        "&access_type=offline"
+        "&prompt=consent"
+    )
+    return {"status": "success", "url": auth_url}
+
+@app.get("/api/auth/google/callback")
+def google_callback(code: str):
+    import json
+
+    import requests
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5173/oauth-callback")
+
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=400, detail="OAuth credentials not configured.")
+
+    # Exchange auth code for tokens
+    token_url = "https://oauth2.googleapis.com/token"
+    payload = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }
+    resp = requests.post(token_url, data=payload, timeout=10)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Failed to exchange token: {resp.text}")
+
+    token_info = resp.json()
+
+    # Save tokens locally
+    token_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".state", "google_token.json")
+    os.makedirs(os.path.dirname(token_path), exist_ok=True)
+
+    info = {
+        "token": token_info.get("access_token"),
+        "refresh_token": token_info.get("refresh_token"),
+        "token_uri": token_url,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scopes": token_info.get("scope", "").split(" "),
+    }
+    if "expires_in" in token_info:
+        expiry_dt = datetime.datetime.utcnow() + datetime.timedelta(seconds=token_info["expires_in"])
+        info["expiry"] = expiry_dt.isoformat() + "Z"
+    with open(token_path, "w") as f:
+        json.dump(info, f)
+
+    # Discover Google Calendars and save them to available_google_calendars
+    from app.mcp_clients import list_google_calendars, sync_local_events_to_google
+    discovered_calendars = list_google_calendars()
+
+    profile = state_store.get_user_profile() or {}
+    current_calendars = profile.get("target_calendars", [])
+    current_google_ids = {c.get("id") for c in current_calendars if c.get("type") == "google"}
+
+    available_cals = []
+    for dc in discovered_calendars:
+        if dc.get("id") not in current_google_ids:
+            available_cals.append(dc)
+
+    profile["available_google_calendars"] = available_cals
+    state_store.update_user_profile(profile)
+
+    # Trigger automatic sync of local cached events
+    sync_res = sync_local_events_to_google(profile)
+
+    return {
+        "status": "success",
+        "calendars": current_calendars,
+        "available_calendars": available_cals,
+        "sync_result": sync_res
+    }
+
+@app.get("/api/auth/google/status")
+def google_status():
+    from app.mcp_clients import get_google_credentials
+    creds = get_google_credentials()
+    if creds:
+        token_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".state", "google_token.json")
+        is_user_oauth = os.path.exists(token_path)
+        return {
+            "connected": True,
+            "type": "oauth" if is_user_oauth else "adc",
+            "scopes": creds.scopes
+        }
+    return {"connected": False}
 
 @app.post("/api/goals/{goal_id}/reflect")
 def reflect_on_goal(goal_id: str, reflection: ReflectionSubmit):
     profile = state_store.get_user_profile()
     if not profile:
         raise HTTPException(status_code=400, detail="Profile not onboarded.")
-        
+
     result = process_user_reflection(
         user_id="test_user_123",
         learning_block_id=reflection.learning_block_id,
         reflection_text=reflection.reflection_text,
-        success_rating=reflection.success_rating
+        success_rating=reflection.success_rating,
+        goal_id=goal_id
     )
-    
+
+    # Re-read the updated profile from process_user_reflection to keep milestone changes
+    profile = state_store.get_user_profile()
+
     # Associate reflection directly with goal
     goals = profile.get("goals", [])
     updated_goals = []
@@ -259,30 +459,29 @@ def reflect_on_goal(goal_id: str, reflection: ReflectionSubmit):
         if g.get("id") == goal_id:
             convs = g.get("conversations", [])
             timestamp = result.get("logged_entry", {}).get("timestamp", "2026-07-02T11:38:00Z")
-            
+
             convs.append({
                 "role": "user",
                 "text": reflection.reflection_text,
-                "rating": reflection.success_rating,
                 "timestamp": timestamp
             })
-            
+
             adj_reason = result["updated_profile"].get("adjustment_reason", "Goal adjusted.")
-            feedback = f"Thank you for sharing your reflection. Success rating: {reflection.success_rating}/5. {adj_reason}"
+            feedback = f"Thank you for sharing your reflection. {adj_reason}"
             convs.append({
                 "role": "model",
                 "text": feedback,
                 "timestamp": timestamp
             })
-            
+
             g["conversations"] = convs
             g["time_spent_mins"] = g.get("time_spent_mins", 0) + 30 # assume 30 minutes added per reflection
-            
+
         updated_goals.append(g)
-        
+
     profile["goals"] = updated_goals
     state_store.update_user_profile(profile)
-    
+
     return {
         "status": "success",
         "result": result,
@@ -301,6 +500,142 @@ def collect_feedback(feedback: Feedback) -> dict[str, str]:
     """
     logger.log_struct(feedback.model_dump(), severity="INFO")
     return {"status": "success"}
+
+
+class ChatMessage(BaseModel):
+    role: str
+    text: str
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+
+@app.post("/api/chat/goals")
+def chat_goals(request: ChatRequest):
+    user_msgs = [m for m in request.messages if m.role == 'user']
+    if not user_msgs:
+        return {"text": "Hello! I am your Skill Concierge assistant. Let's discuss your career aspirations and design high-impact learning goals and weekly projects to get you there.", "suggestedGoal": None}
+
+    first_query = user_msgs[0].text
+    last_query = user_msgs[-1].text
+
+    # 1. Attempt to call Gemini Client (Vertex / Gen AI fallback)
+    try:
+        import json
+
+        from google.genai import Client, types
+        client = None
+        try:
+            client = Client()
+        except Exception:
+            client = Client(vertexai=True)
+
+        if client:
+            system_instruction = """
+            You are the Career Skill Concierge, an expert career counselor and tutor.
+            Your role is to help the user discover their skill goals and design weekly portfolio projects.
+
+            Rules:
+            1. If this is the FIRST message from the user (i.e. the history contains only 1 user query), you MUST ask 2-3 follow-up questions to understand their current familiarity level (beginner, intermediate, advanced) and their preference for conceptual study vs hands-on building. Do NOT recommend a structured goal block yet.
+            2. If the history has 2 or more user messages, summarize their goal, and output a friendly concluding message. At the end of your response, you MUST output a structured JSON upskilling goal object inside markdown code fences (` ```json `), with the following fields:
+               - title: Str (the title of the customized goal/project)
+               - description: Str (brief project overview)
+               - sub_projects: List of Dicts, where each dict has "title" (Str), "completed" (Bool, default False), "dueDate" (Str, YYYY-MM-DD)
+               - skills: List of Dicts, where each dict has "name" (Str), "category" (Str), "career_application" (Str)
+            """
+
+            contents = []
+            for msg in request.messages:
+                contents.append(types.Content(
+                    role="user" if msg.role == "user" else "model",
+                    parts=[types.Part.from_text(text=msg.text)]
+                ))
+
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.7
+                )
+            )
+
+            response_text = response.text
+            suggested_goal = None
+            if "```json" in response_text:
+                try:
+                    parts = response_text.split("```json")
+                    json_str = parts[1].split("```")[0].strip()
+                    suggested_goal = json.loads(json_str)
+                    response_text = parts[0].strip() + "\n\n" + (parts[1].split("```")[1] if len(parts[1].split("```")) > 1 else "").strip()
+                except Exception:
+                    pass
+
+            return {
+                "text": response_text.strip(),
+                "suggestedGoal": suggested_goal
+            }
+    except Exception as e:
+        logger.warning(f"Failed to use live Gemini model for elicitation: {e}. Falling back to rule-based engine.")
+
+    # 2. Rule-based fallback (if client has no credentials or keys)
+    if len(user_msgs) == 1:
+        reply = (
+            f"That sounds like an exciting direction! To make sure I customize this goal perfectly to your lifestyle:\n"
+            f"1. What is your current level of familiarity with \"{last_query}\" (e.g. absolute beginner, some experience, advanced)?\n"
+            f"2. Do you prefer hands-on building projects or conceptual study blocks?"
+        )
+        return {"text": reply, "suggestedGoal": None}
+    else:
+        lower_first = first_query.lower()
+        if "ai" in lower_first or "agentic" in lower_first:
+            reply = "AI engineering roles are growing at 45% YoY. The most in-demand skill right now is building robust agents using Directed Acyclic Graphs (DAG) and the Model Context Protocol (MCP). Based on your feedback, I recommend starting with the project below:"
+            suggestion = {
+                "title": "Master DAG Orchestration & MCP",
+                "description": "Learn Google ADK agent modeling and tool callbacks.",
+                "sub_projects": [
+                    {"title": "Define a 3-node workflow edge mapping", "completed": False, "dueDate": "2026-07-04"},
+                    {"title": "Build a stdio transport server client", "completed": False, "dueDate": "2026-07-06"},
+                    {"title": "Implement Zero-Trust signature checks", "completed": False, "dueDate": "2026-07-09"}
+                ],
+                "skills": [
+                    {"name": "DAG Orchestration", "category": "AI Engineering", "career_application": "AI Architect"},
+                    {"name": "Model Context Protocol (MCP)", "category": "AI Engineering", "career_application": "AI Developer"}
+                ]
+            }
+        elif "mlops" in lower_first or "cloud" in lower_first:
+            reply = "MLOps and cloud pipeline automation are essential for shipping models. Recruiters prioritize candidates with hands-on Kubernetes deployment and Terraform orchestration portfolios. Based on your feedback, here is your customized goal:"
+            suggestion = {
+                "title": "Automate ML Deployment with Cloud GKE",
+                "description": "Deploy models on GKE and configure automated CI/CD logs.",
+                "sub_projects": [
+                    {"title": "Draft a Dockerfile for model endpoint", "completed": False, "dueDate": "2026-07-04"},
+                    {"title": "Configure Kubernetes staging manifest", "completed": False, "dueDate": "2026-07-07"},
+                    {"title": "Setup GitHub Actions trigger on push", "completed": False, "dueDate": "2026-07-10"}
+                ],
+                "skills": [
+                    {"name": "GKE Automation", "category": "MLOps", "career_application": "MLOps Engineer"},
+                    {"name": "Docker Containerization", "category": "DevOps", "career_application": "Cloud Developer"}
+                ]
+            }
+        else:
+            reply = "That is a great direction! To develop skills in that area, it's best to work on a concrete, structured portfolio project. Based on your feedback, I've created the following development block:"
+            suggestion = {
+                "title": f"Master {first_query} Fundamentals",
+                "description": f"Hands-on projects and milestones to develop competencies in {first_query}.",
+                "sub_projects": [
+                    {"title": "Research core syntax and references", "completed": False, "dueDate": "2026-07-04"},
+                    {"title": "Create a simple CLI prototype application", "completed": False, "dueDate": "2026-07-07"},
+                    {"title": "Deploy demo to cloud staging server", "completed": False, "dueDate": "2026-07-10"}
+                ],
+                "skills": [
+                    {"name": f"{first_query} Core", "category": "General Development", "career_application": "Software Engineer"}
+                ]
+            }
+
+        return {
+            "text": reply,
+            "suggestedGoal": suggestion
+        }
 
 
 # Main execution

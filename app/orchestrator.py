@@ -43,13 +43,13 @@ async def onboard_user(ctx: Context, node_input: Any) -> Event:
     # Simulating elicitation step
     career_goals = "AI Engineering"
     hours_per_week = 5
-    excluded_days = ["Saturday", "Sunday"]
+    study_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
     strategy = onboarding_interview(
         user_id=ctx.session.id,
         career_goals=career_goals,
         hours_per_week=hours_per_week,
-        excluded_days=excluded_days,
+        study_days=study_days,
     )
 
     # Return content block for user
@@ -88,8 +88,8 @@ async def stage_schedule(
 
     # Target: weekly_hours_budget, divided by active days
     weekly_hours = profile.get("hours_per_week", 5)
-    excluded_days = profile.get("excluded_days", ["Saturday", "Sunday"])
-    active_days_count = max(1, 7 - len(excluded_days))
+    study_days = profile.get("study_days", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
+    active_days_count = max(1, len(study_days))
     target_daily_mins = int((weekly_hours * 60) / active_days_count)
 
     # Preferred working hours
@@ -118,16 +118,20 @@ async def stage_schedule(
     # Date window: start from 2026-07-02 (Thursday) for 7 days
     base_date = datetime.date(2026, 7, 2)
 
-    # Fetch busy times from Calendar MCP
-    try:
-        mcp_busy = get_calendar_free_busy(
-            "2026-07-02T00:00:00Z", "2026-07-08T23:59:59Z"
-        )
-    except Exception:
-        mcp_busy = []
+    # Fetch busy times from Calendar MCP if whitelisted/selected
+    target_calendars = profile.get("target_calendars", [])
+    google_allowed = any(c.get("selected") and (c.get("type") == "google" or c.get("id") == "cal-work") for c in target_calendars)
+
+    mcp_busy = []
+    if google_allowed:
+        try:
+            mcp_busy = get_calendar_free_busy(
+                "2026-07-02T00:00:00Z", "2026-07-08T23:59:59Z"
+            )
+        except Exception:
+            mcp_busy = []
 
     # Also fetch from target iCal feeds
-    target_calendars = profile.get("target_calendars", [])
     from app.app_utils.ical_parser import parse_ical
     for cal in target_calendars:
         if cal.get("selected") and cal.get("type") == "ical" and cal.get("url"):
@@ -140,7 +144,7 @@ async def stage_schedule(
     for day_offset in range(7):
         current_day = base_date + datetime.timedelta(days=day_offset)
         day_name = current_day.strftime("%A")
-        if day_name in excluded_days:
+        if day_name not in study_days:
             continue
 
         current_day_str = current_day.isoformat()
@@ -249,6 +253,8 @@ async def stage_schedule(
     profile["proposed_events"] = proposed_blocks
     profile["scarcity_flag"] = scarcity_flag
     profile["reason"] = reason_str
+    profile["transaction_id"] = transaction_id
+    profile["token"] = token
     state_store.update_user_profile(profile)
 
     # Cache the proposal in workflow context state
@@ -351,6 +357,8 @@ async def write_to_calendar(ctx: Context, node_input: Any) -> Event:
     profile["proposed_events"] = []
     profile["scarcity_flag"] = False
     profile["reason"] = ""
+    profile["transaction_id"] = None
+    profile["token"] = None
     state_store.update_user_profile(profile)
 
     # Clean up staged proposal by setting it to None

@@ -28,163 +28,72 @@ export default function GoalBuilderChat() {
     setInputValue('');
     setIsTyping(true);
 
-    if (state.isSimulating) {
-      // Simulated response delay
-      setTimeout(() => {
-        let reply = "";
-        let suggestion = null;
+    // Live mode connecting to FastAPI chat endpoint
+    try {
+      const response = await fetch('/api/chat/goals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: updatedMsgs
+        })
+      });
 
-        const lowerText = textToSend.toLowerCase();
-        if (lowerText.includes("ai") || lowerText.includes("agentic")) {
-          reply = "AI engineering roles are growing at 45% YoY. The most in-demand skill right now is building robust agents using Directed Acyclic Graphs (DAG) and the Model Context Protocol (MCP). I recommend starting with the project below:";
-          suggestion = {
-            title: "Master DAG Orchestration & MCP",
-            description: "Learn Google ADK agent modeling and tool callbacks.",
-            sub_projects: [
-              { title: "Define a 3-node workflow edge mapping", completed: false },
-              { title: "Build a stdio transport server client", completed: false },
-              { title: "Implement Zero-Trust signature checks", completed: false }
-            ]
-          };
-        } else if (lowerText.includes("mlops") || lowerText.includes("cloud")) {
-          reply = "MLOps and cloud pipeline automation are essential for shipping models. Recruiters prioritize candidates with hands-on Kubernetes deployment and Terraform orchestration portfolios. Let's add this goal:";
-          suggestion = {
-            title: "Automate ML Deployment with Cloud GKE",
-            description: "Deploy models on GKE and configure automated CI/CD logs.",
-            sub_projects: [
-              { title: "Draft a Dockerfile for model endpoint", completed: false },
-              { title: "Configure Kubernetes staging manifest", completed: false },
-              { title: "Setup GitHub Actions trigger on push", completed: false }
-            ]
-          };
-        } else {
-          reply = `That is a great direction! To develop skills in that area, it's best to work on a concrete, structured portfolio project. Based on market mapping, I've created the following development block:`;
-          suggestion = {
-            title: `Master ${textToSend} Fundamentals`,
-            description: `Hands-on projects and milestones to develop competencies in ${textToSend}.`,
-            sub_projects: [
-              { title: "Research core syntax and references", completed: false },
-              { title: "Create a simple CLI prototype application", completed: false },
-              { title: "Deploy demo to cloud staging server", completed: false }
-            ]
-          };
-        }
-
+      if (response.ok) {
+        const data = await response.json();
         setState({
           builderMessages: [
             ...updatedMsgs,
-            {
-              role: 'model',
-              text: reply,
-              suggestedGoal: suggestion
+            { 
+              role: 'model', 
+              text: data.text,
+              suggestedGoal: data.suggestedGoal || null
             }
           ]
         });
-        setIsTyping(false);
-      }, 1200);
-    } else {
-      // Live mode connecting to FastAPI ADK App
-      try {
-        const response = await fetch('/run', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            user_id: 'test_user_123',
-            session_id: 'active_session_123',
-            new_message: {
-              role: 'user',
-              parts: [{ text: textToSend }]
-            }
-          })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          // Extract text response from runner output stream
-          const parts = data.content?.parts || [];
-          const textReply = parts.map(p => p.text || '').join('\n') || 
-                            "I've updated your upskilling goal preferences. Let's review them in the Schedule or Skills tabs.";
-          
-          setState({
-            builderMessages: [
-              ...updatedMsgs,
-              { role: 'model', text: textReply }
-            ]
-          });
-        } else {
-          throw new Error("Failed to send message to live agent");
-        }
-      } catch (err) {
-        console.error("Live agent builder error:", err);
-        setState({
-          builderMessages: [
-            ...updatedMsgs,
-            { role: 'model', text: `Failed to connect with the live agent. (Error: ${err.message}). Toggle Sim Mode to test the conversation mock!` }
-          ]
-        });
-      } finally {
-        setIsTyping(false);
+      } else {
+        throw new Error("Failed to send message to live agent");
       }
+    } catch (err) {
+      console.error("Live agent builder error:", err);
+      setState({
+        builderMessages: [
+          ...updatedMsgs,
+          { role: 'model', text: `Failed to connect with the live agent. (Error: ${err.message}).` }
+        ]
+      });
+    } finally {
+      setIsTyping(false);
     }
   };
 
   const handleAddSuggestedGoal = async (goal) => {
-    if (state.isSimulating) {
-      const mockId = `goal-${Math.random().toString(36).substring(2, 8)}`;
-      const newGoal = {
-        ...goal,
-        id: mockId,
-        time_spent_mins: 0,
-        conversations: []
-      };
-      
-      // Auto-schedule proposed events in simulation calendar
-      const proposedEvents = [
-        ...state.proposedEvents,
-        {
-          id: `evt-${Math.random().toString(36).substring(2, 6)}`,
-          summary: `Learning: ${goal.title}`,
-          start: "2026-07-06T10:00:00-04:00",
-          end: "2026-07-06T11:00:00-04:00",
-          description: goal.description
-        }
-      ];
-
-      setState({
-        goals: [...state.goals, newGoal],
-        proposedEvents,
-        activeTab: 'skills',
-        activeGoalId: mockId
+    try {
+      const res = await fetch('/api/goals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(goal)
       });
-      alert(`"${goal.title}" has been added to your goals and staged on your calendar!`);
-    } else {
-      try {
-        const res = await fetch('/api/goals', {
+      if (res.ok) {
+        const data = await res.json();
+        setState({ goals: data.goals, activeTab: 'projects', activeGoalId: data.goals[data.goals.length - 1]?.id });
+        
+        // Trigger schedule staging on backend
+        await fetch('/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(goal)
+          body: JSON.stringify({
+            app_name: 'app',
+            user_id: 'test_user_123',
+            session_id: 'active_session_123',
+            new_message: {
+              role: 'user',
+              parts: [{ text: "Re-stage schedule with new goals." }]
+            }
+          })
         });
-        if (res.ok) {
-          const data = await res.json();
-          setState({ goals: data.goals, activeTab: 'skills', activeGoalId: data.goals[data.goals.length - 1]?.id });
-          
-          // Trigger schedule staging on backend
-          await fetch('/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              user_id: 'test_user_123',
-              session_id: 'active_session_123',
-              new_message: {
-                role: 'user',
-                parts: [{ text: "Re-stage schedule with new goals." }]
-              }
-            })
-          });
-        }
-      } catch (err) {
-        console.error("Failed to add live goal:", err);
       }
+    } catch (err) {
+      console.error("Failed to add live goal:", err);
     }
   };
 
@@ -234,10 +143,23 @@ export default function GoalBuilderChat() {
                       <strong>Sub-Projects Checklist:</strong>
                       {msg.suggestedGoal.sub_projects.map((t, tIdx) => (
                         <div key={tIdx} style={styles.proposalTask}>
-                          <span>▫️</span> {t.title}
+                          <span>▫️</span> {t.title} {t.dueDate && <span style={{ opacity: 0.6, fontSize: '9px' }}>(Due: {t.dueDate})</span>}
                         </div>
                       ))}
                     </div>
+
+                    {msg.suggestedGoal.skills && msg.suggestedGoal.skills.length > 0 && (
+                      <div style={styles.proposalSkillsSection}>
+                        <strong>Skills to Gain:</strong>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '4px' }}>
+                          {msg.suggestedGoal.skills.map((s, sIdx) => (
+                            <span key={sIdx} style={styles.proposalSkillTag}>
+                              💡 {s.name} ({s.category})
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     <button 
                       onClick={() => handleAddSuggestedGoal(msg.suggestedGoal)}
@@ -392,6 +314,20 @@ const styles = {
   },
   proposalTask: {
     color: 'var(--color-text-main)',
+  },
+  proposalSkillsSection: {
+    fontSize: '11px',
+    marginTop: '6px',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  proposalSkillTag: {
+    fontSize: '9px',
+    backgroundColor: 'rgba(99,102,241,0.15)',
+    color: 'var(--color-accent)',
+    padding: '2px 6px',
+    borderRadius: '4px',
+    fontWeight: '700',
   },
   addGoalBtn: {
     backgroundColor: 'var(--color-accent)',

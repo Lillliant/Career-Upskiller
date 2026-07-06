@@ -115,6 +115,15 @@ def server_fixture(request: Any) -> Iterator[subprocess.Popen[str]]:
 def test_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
     """Test the chat stream functionality."""
     logger.info("Starting chat stream test")
+    import os
+
+    from app.state_store import state_store
+    if os.path.exists(state_store.profile_path):
+        try:
+            os.remove(state_store.profile_path)
+        except Exception:
+            pass
+
     # Create session first
     user_id = "test_user_123"
     session_data = {"state": {"preferred_language": "English", "visit_count": 1}}
@@ -206,3 +215,114 @@ def test_collect_feedback(server_fixture: subprocess.Popen[str]) -> None:
         FEEDBACK_URL, json=feedback_data, headers=HEADERS, timeout=10
     )
     assert response.status_code == 200
+
+
+def test_reset_endpoint(server_fixture: subprocess.Popen[str]) -> None:
+    """
+    Test that calling /api/reset resets the state store profile and work log.
+    """
+    # 1. Update the profile first
+    profile_data = {
+        "career_goals": "Advanced AI Architect",
+        "hours_per_week": 8,
+    }
+    update_resp = requests.post(
+        f"{BASE_URL}/api/profile", json=profile_data, headers=HEADERS, timeout=10
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["profile"]["career_goals"] == "Advanced AI Architect"
+
+    # 2. Call the reset endpoint
+    reset_resp = requests.post(f"{BASE_URL}/api/reset", headers=HEADERS, timeout=10)
+    assert reset_resp.status_code == 200
+    assert reset_resp.json()["status"] == "success"
+
+    # 3. Verify the profile is cleared
+    get_resp = requests.get(f"{BASE_URL}/api/profile", timeout=10)
+    assert get_resp.status_code == 200
+    # The profile should now be empty or not have the updated career_goals
+    assert get_resp.json().get("career_goals") is None
+
+
+def test_study_days_profile(server_fixture: subprocess.Popen[str]) -> None:
+    """
+    Test that updating the profile with study_days correctly saves and retrieves it.
+    """
+    # 1. Reset first
+    requests.post(f"{BASE_URL}/api/reset", headers=HEADERS, timeout=10)
+
+    # 2. Update with study_days
+    profile_data = {
+        "career_goals": "AI Specialist",
+        "hours_per_week": 6,
+        "study_days": ["Monday", "Wednesday", "Friday"]
+    }
+    update_resp = requests.post(
+        f"{BASE_URL}/api/profile", json=profile_data, headers=HEADERS, timeout=10
+    )
+    assert update_resp.status_code == 200
+    profile_res = update_resp.json()["profile"]
+    assert profile_res["study_days"] == ["Monday", "Wednesday", "Friday"]
+    assert "excluded_days" not in profile_res
+
+    # 3. Retrieve and verify
+    get_resp = requests.get(f"{BASE_URL}/api/profile", timeout=10)
+    assert get_resp.status_code == 200
+    assert get_resp.json()["study_days"] == ["Monday", "Wednesday", "Friday"]
+
+
+def test_create_goal_with_skills(server_fixture: subprocess.Popen[str]) -> None:
+    """
+    Test that creating a goal with skills preserves the skills correctly.
+    """
+    # 1. Reset first
+    requests.post(f"{BASE_URL}/api/reset", headers=HEADERS, timeout=10)
+
+    # 2. Create goal with skills
+    goal_data = {
+        "title": "Master DAG Orchestration & MCP",
+        "description": "Learn Google ADK agent modeling and tool callbacks.",
+        "status": "to-do",
+        "sub_projects": [
+            {"title": "Define a 3-node workflow edge mapping", "completed": False, "dueDate": "2026-07-04"},
+        ],
+        "skills": [
+            {"name": "DAG Orchestration", "category": "AI Engineering", "career_application": "AI Architect"},
+            {"name": "Model Context Protocol (MCP)", "category": "AI Engineering", "career_application": "AI Developer"}
+        ]
+    }
+
+    create_resp = requests.post(
+        f"{BASE_URL}/api/goals", json=goal_data, headers=HEADERS, timeout=10
+    )
+    assert create_resp.status_code == 200
+    goals = create_resp.json()["goals"]
+    assert len(goals) == 1
+    new_goal = goals[0]
+    assert new_goal["title"] == "Master DAG Orchestration & MCP"
+    assert len(new_goal["skills"]) == 2
+    assert new_goal["skills"][0]["name"] == "DAG Orchestration"
+    assert new_goal["skills"][1]["name"] == "Model Context Protocol (MCP)"
+
+    # 3. Test updating goal skills
+    goal_id = new_goal["id"]
+    updated_skills = [
+        {"name": "DAG Orchestration", "category": "AI Engineering", "career_application": "AI Architect"},
+        {"name": "Model Context Protocol (MCP)", "category": "AI Engineering", "career_application": "AI Developer"},
+        {"name": "Advanced Python", "category": "General", "career_application": "Senior Engineer"}
+    ]
+    update_resp = requests.put(
+        f"{BASE_URL}/api/goals/{goal_id}",
+        json={"skills": updated_skills},
+        headers=HEADERS,
+        timeout=10
+    )
+    assert update_resp.status_code == 200
+    updated_goals = update_resp.json()["goals"]
+    assert len(updated_goals) == 1
+    updated_goal = updated_goals[0]
+    assert len(updated_goal["skills"]) == 3
+    assert updated_goal["skills"][2]["name"] == "Advanced Python"
+
+
+

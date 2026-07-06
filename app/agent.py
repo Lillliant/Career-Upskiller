@@ -19,10 +19,11 @@ from google.adk.apps import App, ResumabilityConfig
 
 from app.orchestrator import orchestrator_workflow
 
+from app.app_utils.project_resolver import setup_gcp_environment
+
 # Configure Google auth defaults dynamically without hardcoded keys
 try:
-    _, project_id = google.auth.default()
-    os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+    setup_gcp_environment()
 except Exception:
     pass
 

@@ -3,8 +3,7 @@ import { useState, useEffect } from 'react';
 class AppStateStore {
   constructor() {
     this.state = {
-      // Configuration & Sim Mode
-      isSimulating: true,
+      // Configuration
       activeTab: 'onboarding',
       theme: 'dark', // Default theme
       
@@ -13,13 +12,10 @@ class AppStateStore {
       hoursPerWeek: 5,
       preferredStartTime: '09:00',
       preferredEndTime: '17:00',
-      excludedDays: ['Saturday', 'Sunday'],
-      targetCalendars: [
-        { id: 'cal-work', name: 'Work Calendar', selected: true, sensitive: false, type: 'google', role: 'write' },
-        { id: 'cal-personal', name: 'Personal/Family Calendar', selected: false, sensitive: true, type: 'google', role: 'read_only' },
-        { id: 'cal-learning', name: 'Skill Development Calendar', selected: false, sensitive: false, type: 'google', role: 'read_only' },
-        { id: 'cal-social', name: 'Social & Leisure', selected: false, sensitive: true, type: 'google', role: 'read_only' },
-      ],
+      studyDays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+      targetCalendars: [],
+      availableGoogleCalendars: [],
+      currentWeekOffset: 0,
       marketInsights: [
         "AI Engineering roles grew 45% this quarter.",
         "High demand for Model Context Protocol (MCP) experience.",

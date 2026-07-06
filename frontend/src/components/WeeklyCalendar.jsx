@@ -7,15 +7,17 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
   const [draggedProposedIdx, setDraggedProposedIdx] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Time matrix setup (08:00 - 18:00)
+  // 15-minute grid setup (08:00 - 18:00)
   const startHour = 8;
   const endHour = 18;
-  const slotHeight = 35; // px per 30 minutes
+  const slotHeight = 22; // px per 15 minutes
   const totalMinutes = (endHour - startHour) * 60;
-  const containerHeight = (totalMinutes / 30) * slotHeight;
+  const containerHeight = (totalMinutes / 15) * slotHeight;
 
-  // Generate 7 days starting Thursday 2026-07-02
+  // Generate 7 days starting from base date + currentWeekOffset * 7 days
   const baseDate = new Date(2026, 6, 2); // July 2, 2026
+  baseDate.setDate(baseDate.getDate() + state.currentWeekOffset * 7);
+  
   const weekDays = Array.from({ length: 7 }).map((_, i) => {
     const d = new Date(baseDate);
     d.setDate(baseDate.getDate() + i);
@@ -27,19 +29,20 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     };
   });
 
-  // Time labels list
+  // Time labels list (15-minute intervals)
   const timeSlots = [];
   for (let h = startHour; h < endHour; h++) {
     timeSlots.push({ hour: h, minute: 0, label: `${h.toString().padStart(2, '0')}:00` });
+    timeSlots.push({ hour: h, minute: 15, label: `${h.toString().padStart(2, '0')}:15` });
     timeSlots.push({ hour: h, minute: 30, label: `${h.toString().padStart(2, '0')}:30` });
+    timeSlots.push({ hour: h, minute: 45, label: `${h.toString().padStart(2, '0')}:45` });
   }
 
-  // Load calendar events from backend if live
+  // Load calendar events from backend if live mode
   useEffect(() => {
     const loadEvents = async () => {
-      if (state.isSimulating) return;
       try {
-        const res = await fetch('/api/calendar/events');
+        const res = await fetch(`/api/calendar/events?offset=${state.currentWeekOffset}`);
         if (res.ok) {
           const events = await res.json();
           setState({ calendarEvents: events });
@@ -49,7 +52,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
       }
     };
     loadEvents();
-  }, [state.isSubmitted, state.onboarded]);
+  }, [state.currentWeekOffset, state.isSubmitted, state.onboarded]);
 
   // Helper: check if event is on a specific day
   const getEventsForDay = (dateStr) => {
@@ -62,12 +65,14 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
       }
     });
 
-    // Add proposed events
-    state.proposedEvents.forEach((evt, idx) => {
-      if (evt.start && evt.start.startsWith(dateStr)) {
-        dayEvents.push({ ...evt, isProposed: true, proposedIdx: idx });
-      }
-    });
+    // Add proposed events (only show proposed on the current active week offset = 0)
+    if (state.currentWeekOffset === 0) {
+      state.proposedEvents.forEach((evt, idx) => {
+        if (evt.start && evt.start.startsWith(dateStr)) {
+          dayEvents.push({ ...evt, isProposed: true, proposedIdx: idx });
+        }
+      });
+    }
 
     return dayEvents;
   };
@@ -167,7 +172,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     }
   };
 
-  // Resize drag handler
+  // Resize drag handler (granularity 15m)
   const handleResizeMouseDown = (e, event, isProposed, proposedIdx) => {
     e.stopPropagation();
     e.preventDefault();
@@ -176,8 +181,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
 
     const handleMouseMove = (moveEvent) => {
       const deltaY = moveEvent.clientY - startY;
-      // 1px = (30 mins / slotHeight) minutes
-      const deltaMins = Math.round((deltaY / slotHeight) * 30 / 15) * 15;
+      const deltaMins = Math.round(deltaY / slotHeight) * 15;
       
       if (deltaMins !== 0) {
         const start = new Date(event.start);
@@ -241,6 +245,23 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     setState({ proposedEvents: [] });
   };
 
+  // Navigations
+  const handlePrevWeek = () => {
+    setState({ currentWeekOffset: state.currentWeekOffset - 1 });
+  };
+
+  const handleNextWeek = () => {
+    setState({ currentWeekOffset: state.currentWeekOffset + 1 });
+  };
+
+  const handleCurrentWeek = () => {
+    setState({ currentWeekOffset: 0 });
+  };
+
+  // Formatted date string for week title
+  const startOfWeekStr = weekDays[0].fullDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const endOfWeekStr = weekDays[6].fullDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
   return (
     <div style={styles.calendarPage} className="animate-fade-in">
       <div style={styles.header}>
@@ -248,10 +269,18 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
           <h2 style={styles.pageTitle}>Weekly Schedule Overview 📅</h2>
           <p style={styles.pageSubtitle}>Monitor integrated calendars and staging matrices side-by-side.</p>
         </div>
+
+        {/* Weekly Pagination Navigation */}
+        <div style={styles.navRow}>
+          <button onClick={handlePrevWeek} style={styles.navBtn}>◀ Prev Week</button>
+          <button onClick={handleCurrentWeek} style={{ ...styles.navBtn, fontWeight: '700' }}>Current Week</button>
+          <button onClick={handleNextWeek} style={styles.navBtn}>Next Week ▶</button>
+          <span style={styles.weekRangeText}>{startOfWeekStr} – {endOfWeekStr}</span>
+        </div>
       </div>
 
       {/* Scarcity / Staging Zero-Trust Banner */}
-      {state.proposedEvents.length > 0 && (
+      {state.proposedEvents.length > 0 && state.currentWeekOffset === 0 && (
         <div style={styles.approvalWidget} className="glass-card">
           <div style={styles.approvalHeader}>
             <div style={styles.badge}>🔐 Zero-Trust Stage Staged</div>
@@ -310,7 +339,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
             const dayEvents = getEventsForDay(day.dateStr);
             return (
               <div key={day.dateStr} style={styles.dayColumn}>
-                {/* Visual horizontal slots for dropping */}
+                {/* Visual horizontal slots for dropping (15-minute granularity) */}
                 {timeSlots.map((slot, idx) => (
                   <div 
                     key={idx}
@@ -319,7 +348,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
                     style={{ 
                       ...styles.gridSlotRow, 
                       height: `${slotHeight}px`,
-                      borderBottom: slot.minute === 30 ? '1px dashed var(--calendar-grid-line)' : '1px solid var(--calendar-grid-line)'
+                      borderBottom: slot.minute === 45 ? '1px solid var(--calendar-grid-line)' : '1px dashed rgba(255,255,255,0.02)'
                     }}
                   ></div>
                 ))}
@@ -328,8 +357,8 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
                 {dayEvents.map((evt, idx) => {
                   const startMins = getMinutesFromStart(evt.start);
                   const duration = getDurationMins(evt.start, evt.end);
-                  const top = (startMins / 30) * slotHeight;
-                  const height = (duration / 30) * slotHeight;
+                  const top = (startMins / 15) * slotHeight;
+                  const height = (duration / 15) * slotHeight;
 
                   const isLearning = evt.type === 'learning' || evt.isProposed;
                   const isExternal = evt.type === 'external';
@@ -344,7 +373,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
                         top: `${top}px`,
                         height: `${height}px`,
                         backgroundColor: evt.isProposed 
-                          ? 'rgba(99, 102, 241, 0.08)' 
+                          ? 'rgba(255, 191, 36, 0.08)' 
                           : isExternal 
                             ? 'var(--bg-sidebar)' 
                             : 'rgba(99, 102, 241, 0.15)',
@@ -371,12 +400,12 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
                         <span style={styles.evtDur}>{duration}m</span>
                       </div>
                       
-                      {height > 45 && (
+                      {height > 30 && (
                         <p style={styles.evtDesc}>{evt.description || 'External meetings block'}</p>
                       )}
 
                       {/* Controls for learning blocks */}
-                      {isLearning && height > 60 && (
+                      {isLearning && height > 45 && (
                         <div style={styles.evtControls}>
                           <button 
                             onClick={(e) => { e.stopPropagation(); adjustDuration(evt, evt.isProposed, evt.isProposed ? evt.proposedIdx : null, -15); }}
@@ -422,7 +451,12 @@ const styles = {
     margin: '0 auto',
   },
   header: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
     marginBottom: '24px',
+    flexWrap: 'wrap',
+    gap: '16px',
   },
   pageTitle: {
     fontSize: '22px',
@@ -433,6 +467,26 @@ const styles = {
     fontSize: '13px',
     color: 'var(--color-text-muted)',
     marginTop: '4px',
+  },
+  navRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+  },
+  navBtn: {
+    backgroundColor: 'var(--bg-sidebar)',
+    border: '1px solid var(--input-border)',
+    borderRadius: '6px',
+    color: 'var(--color-text-main)',
+    padding: '6px 12px',
+    fontSize: '12px',
+    cursor: 'pointer',
+  },
+  weekRangeText: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: 'var(--color-text-main)',
+    marginLeft: '6px',
   },
   approvalWidget: {
     border: '1px solid var(--color-warning)',
@@ -569,7 +623,7 @@ const styles = {
     right: '4px',
     borderRadius: '8px',
     border: '1px solid',
-    padding: '6px 8px',
+    padding: '4px 6px',
     display: 'flex',
     flexDirection: 'column',
     justifyContent: 'space-between',
@@ -584,7 +638,7 @@ const styles = {
     gap: '4px',
   },
   evtTitle: {
-    fontSize: '11px',
+    fontSize: '10px',
     fontWeight: '700',
     color: 'var(--color-text-main)',
     whiteSpace: 'nowrap',
@@ -592,15 +646,15 @@ const styles = {
     textOverflow: 'ellipsis',
   },
   evtDur: {
-    fontSize: '9px',
+    fontSize: '8px',
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
     color: 'var(--color-text-muted)',
-    padding: '1px 4px',
-    borderRadius: '4px',
+    padding: '1px 3px',
+    borderRadius: '3px',
     fontWeight: '600',
   },
   evtDesc: {
-    fontSize: '10px',
+    fontSize: '9px',
     color: 'var(--color-text-muted)',
     margin: '2px 0 0 0',
     whiteSpace: 'nowrap',

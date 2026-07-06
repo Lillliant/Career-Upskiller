@@ -1,8 +1,21 @@
 import logging
 import re
+
 import requests
 
 logger = logging.getLogger(__name__)
+
+def normalize_to_local_offset(iso_str: str) -> str:
+    """Converts any ISO 8601 datetime string to local offset (-04:00)."""
+    try:
+        import datetime
+        cleaned = iso_str.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(cleaned)
+        local_tz = datetime.timezone(datetime.timedelta(hours=-4))
+        local_dt = dt.astimezone(local_tz)
+        return local_dt.isoformat()
+    except Exception:
+        return iso_str
 
 def parse_ical_date(val: str) -> str:
     """Converts iCal date format YYYYMMDDTHHMMSS(Z) to ISO 8601 string.
@@ -16,9 +29,9 @@ def parse_ical_date(val: str) -> str:
         time_part = val[9:15]
         formatted = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}T{time_part[:2]}:{time_part[2:4]}:{time_part[4:6]}"
         if val.endswith("Z"):
-            return formatted + "Z"
+            return normalize_to_local_offset(formatted + "Z")
         # If no explicit timezone, default to user's local offset (-04:00)
-        return formatted + "-04:00"
+        return normalize_to_local_offset(formatted + "-04:00")
     elif len(val) == 8:
         # Date only: YYYYMMDD
         return f"{val[:4]}-{val[4:6]}-{val[6:8]}T00:00:00-04:00"
@@ -29,6 +42,9 @@ def parse_ical(content_or_url: str) -> list[dict]:
     Each event has: summary, start, end, description.
     """
     content = ""
+    if content_or_url.startswith("webcal://"):
+        content_or_url = content_or_url.replace("webcal://", "https://", 1)
+
     if content_or_url.startswith("http://") or content_or_url.startswith("https://"):
         try:
             logger.info(f"Fetching iCal feed from: {content_or_url}")
@@ -86,7 +102,7 @@ def parse_ical(content_or_url: str) -> list[dict]:
                 val = match.group(2)
                 # Unescape standard iCal characters
                 val = val.replace("\\,", ",").replace("\\;", ";").replace("\\N", "\n").replace("\\n", "\n")
-                
+
                 if key == "DTSTART":
                     current_event["start"] = parse_ical_date(val)
                 elif key == "DTEND":

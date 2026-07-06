@@ -45,6 +45,12 @@ class BaseStateStore(ABC):
         """Retrieve all reflections associated with a specific goal."""
         pass
 
+    @abstractmethod
+    def reset(self) -> None:
+        """Reset the state store (clear user profile and work log)."""
+        pass
+
+
 
 class LocalJsonStateStore(BaseStateStore):
     def __init__(self, data_dir: str = ".state"):
@@ -122,6 +128,10 @@ class LocalJsonStateStore(BaseStateStore):
     def get_reflections_for_goal(self, goal_id: str) -> list[dict[str, Any]]:
         logs = self.get_work_log()
         return [log for log in logs if log.get("goal_id") == goal_id]
+
+    def reset(self) -> None:
+        self._write_json(self.profile_path, {})
+        self._write_json(self.work_log_path, [])
 
 
 # Global state store instance, easily swappable to FirestoreStateStore later

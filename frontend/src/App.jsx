@@ -3,6 +3,7 @@ import { useAppState } from './stateManager';
 import OnboardingWizard from './components/OnboardingWizard';
 import WeeklyCalendar from './components/WeeklyCalendar';
 import SkillsManager from './components/SkillsManager';
+import ProjectsManager from './components/ProjectsManager';
 import GoalBuilderChat from './components/GoalBuilderChat';
 import AnalyticsSummary from './components/AnalyticsSummary';
 
@@ -20,22 +21,29 @@ export default function App() {
 
   // Load backend profile, goals and events in live mode
   const fetchAllData = async () => {
-    if (state.isSimulating) return;
     try {
       const resProfile = await fetch('/api/profile');
       if (resProfile.ok) {
         const profile = await resProfile.json();
+        if (profile.target_calendars && profile.target_calendars.length > 0) {
+          setState({ targetCalendars: profile.target_calendars });
+        }
+        if (profile.available_google_calendars) {
+          setState({ availableGoogleCalendars: profile.available_google_calendars });
+        }
         if (profile.career_goals) {
           setState({
             careerGoals: profile.career_goals,
             hoursPerWeek: profile.hours_per_week,
             preferredStartTime: profile.preferred_start_time || '09:00',
             preferredEndTime: profile.preferred_end_time || '17:00',
-            excludedDays: profile.excluded_days || ['Saturday', 'Sunday'],
+            studyDays: profile.study_days || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
             targetCalendars: profile.target_calendars || state.targetCalendars,
             proposedEvents: profile.proposed_events || [],
             scarcityFlag: profile.scarcity_flag || false,
             reason: profile.reason || '',
+            transactionId: profile.transaction_id || '',
+            token: profile.token || '',
             onboarded: true
           });
         }
@@ -47,7 +55,8 @@ export default function App() {
         setState({ goals });
       }
 
-      const resCalendar = await fetch('/api/calendar/events');
+      // Pass week offset to fetch events for selected week
+      const resCalendar = await fetch(`/api/calendar/events?offset=${state.currentWeekOffset}`);
       if (resCalendar.ok) {
         const calendarEvents = await resCalendar.json();
         setState({ calendarEvents });
@@ -58,8 +67,33 @@ export default function App() {
   };
 
   React.useEffect(() => {
-    fetchAllData();
-  }, [state.onboarded]);
+    const handleOAuthCallback = async () => {
+      const path = window.location.pathname;
+      const searchParams = new URLSearchParams(window.location.search);
+      const code = searchParams.get('code');
+      
+      if (path === '/oauth-callback' && code) {
+        // Clear history immediately to prevent concurrent duplicate invocations in StrictMode or re-renders
+        window.history.replaceState({}, document.title, "/");
+        try {
+          setState({ activeTab: 'onboarding' });
+          const res = await fetch(`/api/auth/google/callback?code=${code}`);
+          if (res.ok) {
+            await fetchAllData();
+            alert("Google Calendar successfully connected! All local events have been synchronized.");
+          } else {
+            const errData = await res.json();
+            alert(`Failed to connect Google Calendar: ${errData.detail || 'Unknown error'}`);
+          }
+        } catch (e) {
+          console.error("Error during OAuth callback:", e);
+        }
+      } else {
+        fetchAllData();
+      }
+    };
+    handleOAuthCallback();
+  }, [state.onboarded, state.currentWeekOffset]);
 
   const handleApproveHandshake = async (envelope) => {
     const logEntry = {
@@ -70,71 +104,59 @@ export default function App() {
     
     const updatedLogs = [...state.logs, logEntry];
 
-    if (state.isSimulating) {
-      // Simulation mode
-      setState({ 
-        logs: updatedLogs,
-        isSubmitted: true,
-        calendarEvents: [
-          ...state.calendarEvents,
-          ...state.proposedEvents.map(e => ({
-            ...e,
-            type: 'learning',
-            color: '#6366f1'
-          }))
-        ],
-        proposedEvents: [] // Clear staged
-      });
-      return Promise.resolve();
-    } else {
-      // Live Mode: Dispatch to FastAPI backend
-      try {
-        const response = await fetch('/run', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            user_id: 'test_user_123',
-            session_id: 'active_session_123',
-            new_message: {
-              role: 'user',
-              parts: [
-                {
-                  function_response: {
-                    id: 'approval_payload',
-                    name: 'adk_request_input',
-                    response: envelope
-                  }
+    // Live Mode: Dispatch to FastAPI backend
+    try {
+      const response = await fetch('/run', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          app_name: 'app',
+          user_id: 'test_user_123',
+          session_id: 'active_session_123',
+          new_message: {
+            role: 'user',
+            parts: [
+              {
+                function_response: {
+                  id: 'approval_payload',
+                  name: 'adk_request_input',
+                  response: envelope
                 }
-              ]
-            }
-          })
-        });
+              }
+            ]
+          }
+        })
+      });
 
-        if (!response.ok) {
-          throw new Error(`FastAPI response error: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        console.log("Live execution resume response:", data);
-        
-        setState({ 
-          logs: [...updatedLogs, {
-            timestamp: new Date().toISOString(),
-            action: 'Live Calendar Write Confirmed',
-            payload: data
-          }],
-          isSubmitted: true
-        });
-
-        // Trigger refresh
-        setTimeout(fetchAllData, 1000);
-      } catch (err) {
-        console.error("Failed to dispatch live handshake:", err);
-        alert(`Failed to resume backend agent. Make sure fast_api_app.py is running. Error: ${err.message}`);
-        throw err;
+      if (!response.ok) {
+        throw new Error(`FastAPI response error: ${response.statusText}`);
       }
+
+      const data = await response.json();
+      console.log("Live execution resume response:", data);
+      
+      setState({ 
+        logs: [...updatedLogs, {
+          timestamp: new Date().toISOString(),
+          action: 'Live Calendar Write Confirmed',
+          payload: data
+        }],
+        isSubmitted: true,
+        proposedEvents: [],
+        scarcityFlag: false,
+        reason: '',
+        transactionId: '',
+        token: ''
+      });
+
+      // Trigger refresh immediately
+      fetchAllData();
+    } catch (err) {
+      console.error("Failed to dispatch live handshake:", err);
+      alert(`Failed to resume backend agent. Make sure fast_api_app.py is running. Error: ${err.message}`);
+      throw err;
     }
   };
 
@@ -150,14 +172,24 @@ export default function App() {
     });
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
+    try {
+      await fetch('/api/reset', {
+        method: 'POST',
+      });
+    } catch (err) {
+      console.error("Failed to reset backend state:", err);
+    }
+    localStorage.removeItem('onboarding_progress');
     setState({
       careerGoals: '',
       hoursPerWeek: 5,
       preferredStartTime: '09:00',
       preferredEndTime: '17:00',
-      excludedDays: ['Saturday', 'Sunday'],
-      targetCalendars: state.targetCalendars.map(c => ({ ...c, selected: c.id === 'cal-work' })),
+      studyDays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+      targetCalendars: [],
+      availableGoogleCalendars: [],
+      currentWeekOffset: 0,
       proposedEvents: [],
       scarcityFlag: false,
       reason: '',
@@ -209,7 +241,21 @@ export default function App() {
               }}
               disabled={!state.onboarded}
             >
-              🎯 Skills & Projects
+              🏆 My Skills
+            </button>
+
+            <button 
+              onClick={() => setState({ activeTab: 'projects' })}
+              style={{
+                ...styles.navLink,
+                backgroundColor: state.activeTab === 'projects' ? 'rgba(99, 102, 241, 0.12)' : 'transparent',
+                color: state.activeTab === 'projects' ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                fontWeight: state.activeTab === 'projects' ? '700' : '500',
+                borderLeft: state.activeTab === 'projects' ? '3px solid var(--color-accent)' : '3px solid transparent'
+              }}
+              disabled={!state.onboarded}
+            >
+              📋 Projects & Goals
             </button>
 
             <button 
@@ -241,6 +287,20 @@ export default function App() {
             </button>
 
             <button 
+              onClick={() => setState({ activeTab: 'audit' })}
+              style={{
+                ...styles.navLink,
+                backgroundColor: state.activeTab === 'audit' ? 'rgba(99, 102, 241, 0.12)' : 'transparent',
+                color: state.activeTab === 'audit' ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                fontWeight: state.activeTab === 'audit' ? '700' : '500',
+                borderLeft: state.activeTab === 'audit' ? '3px solid var(--color-accent)' : '3px solid transparent'
+              }}
+              disabled={!state.onboarded}
+            >
+              🛡️ Security Audit Logs
+            </button>
+
+            <button 
               onClick={() => setState({ activeTab: 'onboarding' })}
               style={{
                 ...styles.navLink,
@@ -250,24 +310,12 @@ export default function App() {
                 borderLeft: state.activeTab === 'onboarding' ? '3px solid var(--color-accent)' : '3px solid transparent'
               }}
             >
-              ⚙️ Settings / Onboarding
+              ⚙️ Settings
             </button>
           </nav>
         </div>
 
         <div style={styles.sidebarBottom}>
-          <div style={styles.modeIndicator}>
-            <div style={styles.modeText}>
-              {state.isSimulating ? '🛠️ Sim Mode (Mock)' : '⚡ Live Agent Active'}
-            </div>
-            <button 
-              onClick={() => setState({ isSimulating: !state.isSimulating })}
-              style={styles.modeToggleBtn}
-            >
-              Switch Mode
-            </button>
-          </div>
-
           <div style={styles.themeRow}>
             <button 
               onClick={() => setState({ theme: state.theme === 'dark' ? 'light' : 'dark' })}
@@ -299,32 +347,44 @@ export default function App() {
               />
             )}
             {state.activeTab === 'skills' && <SkillsManager />}
+            {state.activeTab === 'projects' && <ProjectsManager />}
             {state.activeTab === 'builder' && <GoalBuilderChat />}
             {state.activeTab === 'summary' && <AnalyticsSummary />}
-          </div>
-        )}
-
-        {/* Transaction Security Logs */}
-        {state.logs.length > 0 && (
-          <footer style={styles.logInspector} className="glass-card">
-            <div style={styles.logHeader}>
-              <span>🛡️ Zero-Trust Security Audit Logs</span>
-              <span style={styles.badgeCount}>{state.logs.length} entries</span>
-            </div>
-            <div style={styles.logList}>
-              {state.logs.map((log, idx) => (
-                <div key={idx} style={styles.logItem}>
-                  <div style={styles.logMeta}>
-                    <span style={styles.logTime}>{new Date(log.timestamp).toLocaleTimeString()}</span>
-                    <span style={styles.logAction}>{log.action}</span>
+            {state.activeTab === 'audit' && (
+              <div style={{ width: '100%', maxWidth: '900px', margin: '0 auto' }}>
+                <h2 style={{ color: 'var(--color-text-main)', fontSize: '22px', margin: '0 0 4px 0' }}>Security Audit Logs 🛡️</h2>
+                <p style={{ color: 'var(--color-text-muted)', fontSize: '13px', margin: '0 0 24px 0' }}>
+                  Zero-Trust security telemetry and cryptographic schedule signatures.
+                </p>
+                
+                {state.logs.length === 0 ? (
+                  <div className="glass-card" style={{ padding: '30px', textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    No audit logs captured yet. Stage and approve schedule proposals on the weekly calendar to populate entries.
                   </div>
-                  <pre style={styles.logPayload}>
-                    {JSON.stringify(log.payload, null, 2)}
-                  </pre>
-                </div>
-              ))}
-            </div>
-          </footer>
+                ) : (
+                  <div className="glass-card" style={{ padding: '24px' }}>
+                    <div style={styles.logHeader}>
+                      <span>Cryptographic Envelope Ledger</span>
+                      <span style={styles.badgeCount}>{state.logs.length} entries</span>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      {state.logs.map((log, idx) => (
+                        <div key={idx} style={styles.logItem}>
+                          <div style={styles.logMeta}>
+                            <span style={styles.logTime}>{new Date(log.timestamp).toLocaleString()}</span>
+                            <span style={styles.logAction}>{log.action}</span>
+                          </div>
+                          <pre style={styles.logPayload}>
+                            {JSON.stringify(log.payload, null, 2)}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </main>
     </div>

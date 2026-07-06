@@ -25,6 +25,14 @@ def test_agent_stream() -> None:
     Integration test for the agent stream functionality.
     Tests that the agent returns valid streaming responses.
     """
+    import os
+
+    from app.state_store import state_store
+    if os.path.exists(state_store.profile_path):
+        try:
+            os.remove(state_store.profile_path)
+        except Exception:
+            pass
 
     session_service = InMemorySessionService()
 
