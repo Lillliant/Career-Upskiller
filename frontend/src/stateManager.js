@@ -16,6 +16,7 @@ class AppStateStore {
       targetCalendars: [],
       availableGoogleCalendars: [],
       currentWeekOffset: 0,
+      stagedWeekOffset: null,
       marketInsights: [
         "AI Engineering roles grew 45% this quarter.",
         "High demand for Model Context Protocol (MCP) experience.",
@@ -44,9 +45,6 @@ class AppStateStore {
         { role: 'model', text: "Hello! I am your Skill Concierge assistant. Let's discuss your career aspirations and design high-impact learning goals and weekly projects to get you there." }
       ],
       builderArchivedConversations: [],
-      
-      // Reflection / Work logs
-      logs: []
     };
     this.listeners = new Set();
   }

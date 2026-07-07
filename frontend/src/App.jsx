@@ -116,24 +116,11 @@ export default function App() {
   }, [state.onboarded, state.currentWeekOffset, state.activeTab]);
 
   const handleApproveHandshake = async (envelope) => {
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      action: 'Zero-Trust Approval Signature Dispatched',
-      payload: envelope
-    };
-    
-    const updatedLogs = [...state.logs, logEntry];
-
     try {
       const data = await approveWeeklySchedule(envelope);
       console.log("Schedule approval response:", data);
       
       setState({ 
-        logs: [...updatedLogs, {
-          timestamp: new Date().toISOString(),
-          action: 'Live Calendar Write Confirmed',
-          payload: data
-        }],
         isSubmitted: true,
         proposedEvents: [],
         scarcityFlag: false,
@@ -152,16 +139,9 @@ export default function App() {
   };
 
   const handleCancelHandshake = async (envelope) => {
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      action: 'Transaction Rejected & Cancelled',
-      payload: envelope
-    };
-
     try {
       await rejectWeeklySchedule(envelope);
       setState({ 
-        logs: [...state.logs, logEntry],
         isSubmitted: false,
         proposedEvents: [],
         scarcityFlag: false,
@@ -201,7 +181,6 @@ export default function App() {
       goals: [],
       calendarEvents: [],
       scheduledEvents: [],
-      logs: [],
       activeTab: 'onboarding'
     });
   };
@@ -291,20 +270,6 @@ export default function App() {
             </button>
 
             <button 
-              onClick={() => setState({ activeTab: 'audit' })}
-              style={{
-                ...styles.navLink,
-                backgroundColor: state.activeTab === 'audit' ? 'rgba(99, 102, 241, 0.12)' : 'transparent',
-                color: state.activeTab === 'audit' ? 'var(--color-accent)' : 'var(--color-text-muted)',
-                fontWeight: state.activeTab === 'audit' ? '700' : '500',
-                borderLeft: state.activeTab === 'audit' ? '3px solid var(--color-accent)' : '3px solid transparent'
-              }}
-              disabled={!state.onboarded}
-            >
-              🛡️ Security Audit Logs
-            </button>
-
-            <button 
               onClick={() => setState({ activeTab: 'onboarding' })}
               style={{
                 ...styles.navLink,
@@ -355,40 +320,6 @@ export default function App() {
             {state.activeTab === 'builder' && <GoalBuilderChat />}
             {state.activeTab === 'reflection' && <ReflectionAgentChat />}
             {state.activeTab === 'summary' && <AnalyticsSummary />}
-            {state.activeTab === 'audit' && (
-              <div style={{ width: '100%', maxWidth: '900px', margin: '0 auto' }}>
-                <h2 style={{ color: 'var(--color-text-main)', fontSize: '22px', margin: '0 0 4px 0' }}>Security Audit Logs 🛡️</h2>
-                <p style={{ color: 'var(--color-text-muted)', fontSize: '13px', margin: '0 0 24px 0' }}>
-                  Zero-Trust security telemetry and cryptographic schedule signatures.
-                </p>
-                
-                {state.logs.length === 0 ? (
-                  <div className="glass-card" style={{ padding: '30px', textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                    No audit logs captured yet. Stage and approve schedule proposals on the weekly calendar to populate entries.
-                  </div>
-                ) : (
-                  <div className="glass-card" style={{ padding: '24px' }}>
-                    <div style={styles.logHeader}>
-                      <span>Cryptographic Envelope Ledger</span>
-                      <span style={styles.badgeCount}>{state.logs.length} entries</span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                      {state.logs.map((log, idx) => (
-                        <div key={idx} style={styles.logItem}>
-                          <div style={styles.logMeta}>
-                            <span style={styles.logTime}>{new Date(log.timestamp).toLocaleString()}</span>
-                            <span style={styles.logAction}>{log.action}</span>
-                          </div>
-                          <pre style={styles.logPayload}>
-                            {JSON.stringify(log.payload, null, 2)}
-                          </pre>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         )}
       </main>
@@ -525,64 +456,5 @@ const styles = {
     flexDirection: 'column',
     alignItems: 'center',
   },
-  logInspector: {
-    marginTop: '40px',
-    width: '100%',
-    maxWidth: '900px',
-  },
-  logHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    fontSize: '12px',
-    fontWeight: '600',
-    color: 'var(--color-accent)',
-    textTransform: 'uppercase',
-    letterSpacing: '0.05em',
-    marginBottom: '14px',
-  },
-  badgeCount: {
-    fontSize: '10px',
-    backgroundColor: 'rgba(99, 102, 241, 0.1)',
-    padding: '2px 8px',
-    borderRadius: '10px',
-    color: 'var(--color-accent)',
-  },
-  logList: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '12px',
-    maxHeight: '200px',
-    overflowY: 'auto',
-  },
-  logItem: {
-    backgroundColor: 'rgba(0,0,0,0.15)',
-    borderRadius: '8px',
-    border: '1px solid var(--border-divider)',
-    padding: '12px',
-  },
-  logMeta: {
-    display: 'flex',
-    gap: '12px',
-    fontSize: '11px',
-    marginBottom: '6px',
-  },
-  logTime: {
-    color: 'var(--color-text-muted)',
-  },
-  logAction: {
-    color: 'var(--color-text-main)',
-    fontWeight: '600',
-  },
-  logPayload: {
-    fontSize: '11px',
-    color: 'var(--color-text-muted)',
-    fontFamily: 'monospace',
-    margin: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.2)',
-    padding: '8px',
-    borderRadius: '4px',
-    overflowX: 'auto',
-  }
 };
 

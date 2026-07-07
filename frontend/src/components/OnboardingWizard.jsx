@@ -441,8 +441,8 @@ export default function OnboardingWizard() {
                 {state.availableGoogleCalendars.map(cal => {
                   const isSelected = selectedImportIds.includes(cal.id);
                   return (
-                    <label 
-                      key={cal.id} 
+                    <label
+                      key={cal.id}
                       style={{
                         ...styles.importItem,
                         backgroundColor: isSelected ? 'rgba(99, 102, 241, 0.1)' : 'rgba(15, 23, 42, 0.2)',
@@ -474,8 +474,8 @@ export default function OnboardingWizard() {
             {localCalendars.map(cal => {
               const isWrite = cal.role === 'write';
               return (
-                <div 
-                  key={cal.id} 
+                <div
+                  key={cal.id}
                   style={{
                     ...styles.calendarCard,
                     borderColor: isWrite ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-card)',
@@ -536,7 +536,7 @@ export default function OnboardingWizard() {
           {/* Add Calendar Form */}
           <form onSubmit={handleAddCalendar} style={styles.addCalForm}>
             <h4 style={{ ...styles.label, margin: '0 0 14px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--color-accent)' }}>Connect New Calendar</h4>
-            
+
             <div style={styles.providerToggleContainer}>
               <button
                 type="button"
@@ -597,8 +597,8 @@ export default function OnboardingWizard() {
               </div>
             )}
 
-            <button 
-              type="submit" 
+            <button
+              type="submit"
               style={styles.addCalBtn}
             >
               {newCalType === 'google' ? '🔗 Connect Google Calendar' : '🔗 Connect iCal Feed'}
@@ -690,12 +690,6 @@ export default function OnboardingWizard() {
               })}
             </div>
           </div>
-
-          <div style={styles.buttonGroup}>
-            <button onClick={() => setStep(2)} style={styles.primaryButton}>
-              Next: Calendar Scoping →
-            </button>
-          </div>
         </div>
       )}
 
@@ -716,8 +710,8 @@ export default function OnboardingWizard() {
                 {state.availableGoogleCalendars.map(cal => {
                   const isSelected = selectedImportIds.includes(cal.id);
                   return (
-                    <label 
-                      key={cal.id} 
+                    <label
+                      key={cal.id}
                       style={{
                         ...styles.importItem,
                         backgroundColor: isSelected ? 'rgba(99, 102, 241, 0.1)' : 'rgba(15, 23, 42, 0.2)',
@@ -752,8 +746,8 @@ export default function OnboardingWizard() {
               localCalendars.map(cal => {
                 const isWrite = cal.role === 'write';
                 return (
-                  <div 
-                    key={cal.id} 
+                  <div
+                    key={cal.id}
                     style={{
                       ...styles.calendarCard,
                       borderColor: isWrite ? 'rgba(99, 102, 241, 0.4)' : 'var(--border-card)',
@@ -815,7 +809,7 @@ export default function OnboardingWizard() {
           {/* Add Calendar Form */}
           <form onSubmit={handleAddCalendar} style={styles.addCalForm}>
             <h4 style={{ ...styles.label, margin: '0 0 14px 0', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--color-accent)' }}>Connect New Calendar</h4>
-            
+
             <div style={styles.providerToggleContainer}>
               <button
                 type="button"
@@ -876,8 +870,8 @@ export default function OnboardingWizard() {
               </div>
             )}
 
-            <button 
-              type="submit" 
+            <button
+              type="submit"
               style={styles.addCalBtn}
             >
               {newCalType === 'google' ? '🔗 Connect Google Calendar' : '🔗 Connect iCal Feed'}

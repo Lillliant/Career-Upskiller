@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAppState } from '../stateManager';
-import { stageWeeklySchedule } from '../scheduleApi';
+import { stageWeeklySchedule, fetchScheduleCapacity, rebalanceSchedule, resumeOnHoldGoals } from '../scheduleApi';
 
 const PRIORITY_LABELS = {
   0: 'Low urgency',
@@ -101,6 +101,8 @@ export default function ProjectsManager() {
 
   // Filter states
   const [filterStatus, setFilterStatus] = useState('All');
+  const [rebalanceLoading, setRebalanceLoading] = useState(false);
+  const [resumeLoading, setResumeLoading] = useState(false);
 
   // List vs detail navigation
   const [view, setView] = useState('list');
@@ -169,8 +171,8 @@ export default function ProjectsManager() {
     }
 
     if (sortBy === 'status') {
-      const order = { 'in-progress': 0, 'to-do': 1, 'done': 2, 'archived': 3 };
-      return goalsCopy.sort((a, b) => (order[a.status] ?? 4) - (order[b.status] ?? 4));
+      const order = { 'in-progress': 0, 'to-do': 1, 'on-hold': 2, 'done': 3, 'archived': 4 };
+      return goalsCopy.sort((a, b) => (order[a.status] ?? 5) - (order[b.status] ?? 5));
     }
 
     if (sortBy === 'duedate') {
@@ -212,6 +214,7 @@ export default function ProjectsManager() {
   const totalProjectCount = state.goals.length;
   const filteredProjectCount = sortedGoals.length;
   const capacityWarning = state.goals.find((g) => g.scheduling_warning)?.scheduling_warning;
+  const onHoldGoals = state.goals.filter((g) => g.status === 'on-hold');
   const goalHoursStats = activeGoal ? computeGoalHoursStats(activeGoal) : null;
 
   const openProject = (goalId) => {
@@ -311,6 +314,159 @@ export default function ProjectsManager() {
       console.error("Failed to update status:", err);
     }
   };
+
+  const applyScheduleRebalance = async ({ pauseLowerPriority = false, hoursPerWeek = null } = {}) => {
+    setRebalanceLoading(true);
+    try {
+      const data = await rebalanceSchedule({
+        preview: false,
+        pauseLowerPriority,
+        hoursPerWeek,
+      });
+      setState({ goals: data.goals || [] });
+      if (hoursPerWeek != null) {
+        setState({ hoursPerWeek });
+      }
+      return data;
+    } catch (err) {
+      console.error('Failed to rebalance schedule:', err);
+      window.alert(err.message || 'Failed to rebalance schedule.');
+      return null;
+    } finally {
+      setRebalanceLoading(false);
+    }
+  };
+
+  const handleRebalanceDates = async () => {
+    if (!window.confirm('Rebalance due dates across all projects by priority? Urgent work will be scheduled first.')) {
+      return;
+    }
+    await applyScheduleRebalance();
+  };
+
+  const handleFocusUrgent = async () => {
+    if (!window.confirm('Pause lower-priority projects and rebalance due dates so urgent work is scheduled first?')) {
+      return;
+    }
+    await applyScheduleRebalance({ pauseLowerPriority: true });
+  };
+
+  const handleIncreaseWeeklyHours = async () => {
+    try {
+      const capData = await fetchScheduleCapacity();
+      const suggested = capData.capacity?.suggested_hours_per_week || 6;
+      const rounded = Math.ceil(suggested);
+      if (!window.confirm(`Increase weekly study hours to ${rounded} and rebalance due dates?`)) {
+        return;
+      }
+      await applyScheduleRebalance({ hoursPerWeek: rounded });
+    } catch (err) {
+      console.error('Failed to update weekly hours:', err);
+      window.alert('Could not update weekly study hours.');
+    }
+  };
+
+  const handleResumeGoal = async (goalId, { skipConfirm = false } = {}) => {
+    const goal = state.goals.find((g) => g.id === goalId);
+    if (!goal || goal.status !== 'on-hold') return;
+    if (
+      !skipConfirm
+      && !window.confirm(`Resume "${goal.title}"? Due dates will be restored to their pre-pause schedule.`)
+    ) {
+      return;
+    }
+    setResumeLoading(true);
+    try {
+      const data = await resumeOnHoldGoals({ goalIds: [goalId] });
+      setState({ goals: data.goals || [] });
+    } catch (err) {
+      console.error('Failed to resume project:', err);
+      window.alert(err.message || 'Failed to resume project.');
+    } finally {
+      setResumeLoading(false);
+    }
+  };
+
+  const handleResumeAllOnHold = async () => {
+    if (!onHoldGoals.length) return;
+    const label = onHoldGoals.length === 1
+      ? `"${onHoldGoals[0].title}"`
+      : `${onHoldGoals.length} projects`;
+    if (!window.confirm(`Resume ${label}? Due dates will be restored to their pre-pause schedule.`)) {
+      return;
+    }
+    setResumeLoading(true);
+    try {
+      const data = await resumeOnHoldGoals();
+      setState({ goals: data.goals || [] });
+    } catch (err) {
+      console.error('Failed to resume projects:', err);
+      window.alert(err.message || 'Failed to resume projects.');
+    } finally {
+      setResumeLoading(false);
+    }
+  };
+
+  const renderOnHoldBanner = () => {
+    if (!onHoldGoals.length) return null;
+    const names = onHoldGoals.map((g) => g.title).join(', ');
+    const reason = onHoldGoals.length === 1 ? onHoldGoals[0]?.on_hold_reason : null;
+    return (
+      <div style={styles.onHoldBanner} className="glass-card">
+        <div style={{ marginBottom: '10px' }}>
+          <strong>⏸️ On hold:</strong>{' '}
+          {onHoldGoals.length === 1
+            ? `${onHoldGoals[0].title} is paused.`
+            : `${onHoldGoals.length} projects are paused (${names}).`}
+          {reason && (
+            <span style={styles.onHoldReason}> {reason}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          style={styles.warningActionBtn}
+          onClick={handleResumeAllOnHold}
+          disabled={resumeLoading || rebalanceLoading}
+        >
+          Resume all on-hold projects
+        </button>
+      </div>
+    );
+  };
+
+  const renderCapacityWarning = (warningText) => (
+    <div style={styles.warningBanner} className="glass-card">
+      <div style={{ marginBottom: '10px' }}>
+        <strong>⚠️ Scheduling capacity warning:</strong> {warningText}
+      </div>
+      <div style={styles.warningActions}>
+        <button
+          type="button"
+          style={styles.warningActionBtn}
+          onClick={handleFocusUrgent}
+          disabled={rebalanceLoading}
+        >
+          Focus on urgent projects
+        </button>
+        <button
+          type="button"
+          style={styles.warningActionBtn}
+          onClick={handleRebalanceDates}
+          disabled={rebalanceLoading}
+        >
+          Rebalance due dates
+        </button>
+        <button
+          type="button"
+          style={styles.warningActionBtnSecondary}
+          onClick={handleIncreaseWeeklyHours}
+          disabled={rebalanceLoading}
+        >
+          Increase weekly hours
+        </button>
+      </div>
+    </div>
+  );
 
   const handleAddTask = async (e) => {
     e.preventDefault();
@@ -676,11 +832,8 @@ export default function ProjectsManager() {
             <p style={styles.pageSubtitle}>Manage your learning projects, milestones, and skill mappings.</p>
           </div>
 
-          {capacityWarning && (
-            <div style={styles.warningBanner} className="glass-card">
-              <strong>⚠️ Scheduling capacity warning:</strong> {capacityWarning}
-            </div>
-          )}
+          {capacityWarning && renderCapacityWarning(capacityWarning)}
+          {renderOnHoldBanner()}
 
           <div style={styles.createBox} className="glass-card">
             <h3 style={styles.sectionTitle}>Add New Goal 🎯</h3>
@@ -733,6 +886,7 @@ export default function ProjectsManager() {
                 <option value="All">All</option>
                 <option value="to-do">To-do</option>
                 <option value="in-progress">In-progress</option>
+                <option value="on-hold">On hold</option>
                 <option value="done">Done</option>
                 <option value="archived">Archived</option>
               </select>
@@ -775,13 +929,16 @@ export default function ProjectsManager() {
                       <h4 style={styles.goalTitle}>{g.title}</h4>
                       <span style={{
                         ...styles.statusBadge,
-                        backgroundColor: g.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : g.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : 'rgba(120, 120, 120, 0.15)',
-                        color: g.status === 'done' ? 'var(--color-success)' : g.status === 'in-progress' ? 'var(--color-accent)' : 'var(--color-text-muted)'
+                        backgroundColor: g.status === 'done' ? 'rgba(16, 185, 129, 0.15)' : g.status === 'in-progress' ? 'rgba(99, 102, 241, 0.15)' : g.status === 'on-hold' ? 'rgba(251, 191, 36, 0.15)' : 'rgba(120, 120, 120, 0.15)',
+                        color: g.status === 'done' ? 'var(--color-success)' : g.status === 'in-progress' ? 'var(--color-accent)' : g.status === 'on-hold' ? '#fbbf24' : 'var(--color-text-muted)'
                       }}>
                         {g.status}
                       </span>
                     </div>
                     <p style={styles.goalDesc}>{g.description || 'No description'}</p>
+                    {g.status === 'on-hold' && g.on_hold_reason && (
+                      <p style={styles.onHoldCardReason}>{g.on_hold_reason}</p>
+                    )}
                     <div style={styles.goalFooter}>
                       <span>🎯 {priorityLabel(g.priority)}</span>
                       <span>📋 {(g.sub_projects || []).length} milestones</span>
@@ -791,6 +948,19 @@ export default function ProjectsManager() {
                       )}
                       <span>⏱️ {g.time_spent_mins || 0}m logged</span>
                     </div>
+                    {g.status === 'on-hold' && (
+                      <button
+                        type="button"
+                        style={styles.resumeCardBtn}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleResumeGoal(g.id);
+                        }}
+                        disabled={resumeLoading || rebalanceLoading}
+                      >
+                        Resume project
+                      </button>
+                    )}
                   </div>
                 );
               })
@@ -815,9 +985,23 @@ export default function ProjectsManager() {
 
         {activeGoal ? (
           <div style={styles.detailCard} className="glass-card">
-            {activeGoal.scheduling_warning && (
-              <div style={styles.warningBanner}>
-                <strong>⚠️ Scheduling warning:</strong> {activeGoal.scheduling_warning}
+            {activeGoal.scheduling_warning && renderCapacityWarning(activeGoal.scheduling_warning)}
+            {activeGoal.status === 'on-hold' && (
+              <div style={styles.onHoldBanner}>
+                <div style={{ marginBottom: '10px' }}>
+                  <strong>⏸️ This project is on hold.</strong>
+                  {activeGoal.on_hold_reason && (
+                    <span style={styles.onHoldReason}> {activeGoal.on_hold_reason}</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  style={styles.warningActionBtn}
+                  onClick={() => handleResumeGoal(activeGoal.id)}
+                  disabled={resumeLoading || rebalanceLoading}
+                >
+                  Resume project
+                </button>
               </div>
             )}
             <div style={styles.detailHeader}>
@@ -907,6 +1091,7 @@ export default function ProjectsManager() {
                 >
                   <option value="to-do">To Do</option>
                   <option value="in-progress">In Progress</option>
+                  <option value="on-hold">On Hold</option>
                   <option value="done">Completed</option>
                   <option value="archived">Archived</option>
                 </select>
@@ -1475,6 +1660,63 @@ const styles = {
     fontSize: '12px',
     lineHeight: '1.5',
     marginBottom: '8px',
+  },
+  warningActions: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '8px',
+  },
+  warningActionBtn: {
+    padding: '6px 12px',
+    borderRadius: '6px',
+    border: 'none',
+    backgroundColor: 'var(--color-accent)',
+    color: '#fff',
+    fontSize: '11px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
+  warningActionBtnSecondary: {
+    padding: '6px 12px',
+    borderRadius: '6px',
+    border: '1px solid rgba(99, 102, 241, 0.35)',
+    backgroundColor: 'transparent',
+    color: 'var(--color-accent)',
+    fontSize: '11px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
+  onHoldBanner: {
+    padding: '12px 16px',
+    borderRadius: '8px',
+    border: '1px solid rgba(251, 191, 36, 0.35)',
+    backgroundColor: 'rgba(251, 191, 36, 0.08)',
+    color: 'var(--color-text-main)',
+    fontSize: '12px',
+    lineHeight: '1.5',
+    marginBottom: '12px',
+  },
+  onHoldReason: {
+    opacity: 0.85,
+    fontStyle: 'italic',
+  },
+  onHoldCardReason: {
+    fontSize: '11px',
+    color: '#fbbf24',
+    margin: '0 0 8px 0',
+    fontStyle: 'italic',
+  },
+  resumeCardBtn: {
+    marginTop: '10px',
+    width: '100%',
+    padding: '8px 12px',
+    borderRadius: '6px',
+    border: 'none',
+    backgroundColor: 'var(--color-accent)',
+    color: '#fff',
+    fontSize: '11px',
+    fontWeight: '600',
+    cursor: 'pointer',
   },
   priorityBadge: {
     display: 'inline-block',

@@ -1,56 +1,108 @@
 import React from 'react';
 import { useAppState } from '../stateManager';
 
+function parseGoalTitleFromSummary(summary) {
+  if (!summary) return null;
+  const prefix = summary.includes(' - ') ? summary.split(' - ')[0] : summary;
+  if (prefix.startsWith('Learning: ')) return prefix.slice(10).trim();
+  if (prefix.startsWith('Micro-learning: ')) return prefix.slice(16).trim();
+  return null;
+}
+
+function isLearningEvent(evt) {
+  return !evt.type || evt.type === 'learning';
+}
+
+function eventDurationMins(evt) {
+  const start = new Date(evt.start);
+  const end = new Date(evt.end);
+  return (end - start) / 60000;
+}
+
+function getScheduleEvents(state) {
+  return state.scheduledEvents?.length > 0 ? state.scheduledEvents : [];
+}
+
+function buildScheduledMinsByGoal(events) {
+  const map = {};
+  (events || []).forEach((evt) => {
+    if (!isLearningEvent(evt)) return;
+    const goalTitle = parseGoalTitleFromSummary(evt.summary);
+    if (!goalTitle) return;
+    map[goalTitle] = (map[goalTitle] || 0) + eventDurationMins(evt);
+  });
+  return map;
+}
+
+function buildDoneMinsByGoal(events, now = Date.now()) {
+  const map = {};
+  (events || []).forEach((evt) => {
+    if (!isLearningEvent(evt)) return;
+    if (new Date(evt.end).getTime() > now) return;
+    const goalTitle = parseGoalTitleFromSummary(evt.summary);
+    if (!goalTitle) return;
+    map[goalTitle] = (map[goalTitle] || 0) + eventDurationMins(evt);
+  });
+  return map;
+}
+
+function sumLearningEventMins(events, { onlyPast = false, now = Date.now() } = {}) {
+  return (events || []).reduce((total, evt) => {
+    if (!isLearningEvent(evt)) return total;
+    if (onlyPast && new Date(evt.end).getTime() > now) return total;
+    return total + eventDurationMins(evt);
+  }, 0);
+}
+
+function computeGoalScheduledMins(goal) {
+  let total = 0;
+  (goal.sub_projects || []).forEach((m) => {
+    (m.tasks || []).forEach((t) => {
+      total += t.allocated_time_mins || 0;
+    });
+  });
+  return total;
+}
+
+function formatDurationMins(mins) {
+  if (mins < 60) return `${Math.round(mins)}m`;
+  const hours = Math.round((mins / 60) * 10) / 10;
+  return `${hours}h`;
+}
+
 export default function AnalyticsSummary() {
   const [state] = useAppState();
+  const scheduleEvents = getScheduleEvents(state);
 
-  // Helper to calculate total scheduled hours (across all weeks)
-  const calculateTotalScheduledHours = () => {
-    let totalMs = 0;
-    const events = state.scheduledEvents && state.scheduledEvents.length > 0
-      ? state.scheduledEvents
-      : state.calendarEvents;
-      
-    events.forEach(evt => {
-      if (!evt.type || evt.type === 'learning') {
-        const start = new Date(evt.start);
-        const end = new Date(evt.end);
-        totalMs += (end - start);
-      }
-    });
-    return (totalMs / (1000 * 60 * 60)); // convert to hours
-  };
+  const totalHoursScheduled = sumLearningEventMins(scheduleEvents) / 60;
+  const totalHoursDone = sumLearningEventMins(scheduleEvents, { onlyPast: true }) / 60;
 
-  // Helper to calculate scheduled hours specifically for the current selected week offset
   const calculateWeeklyScheduledHours = () => {
     let totalMs = 0;
-    state.calendarEvents.forEach(evt => {
+    state.calendarEvents.forEach((evt) => {
       if (evt.type === 'learning') {
         const start = new Date(evt.start);
         const end = new Date(evt.end);
         totalMs += (end - start);
       }
     });
-    return (totalMs / (1000 * 60 * 60)); // convert to hours
+    return totalMs / (1000 * 60 * 60);
   };
 
-  const totalHoursScheduled = calculateTotalScheduledHours();
   const weeklyHoursScheduled = calculateWeeklyScheduledHours();
   const weeklyTarget = state.hoursPerWeek || 5;
   const progressPercent = Math.min(Math.round((weeklyHoursScheduled / weeklyTarget) * 100), 100);
-
-  // Group goals and count milestones
-  const activeGoalsCount = state.goals.filter(g => g.status === 'in-progress' || g.status === 'to-do').length;
-  const completedGoalsCount = state.goals.filter(g => g.status === 'done').length;
+  const scheduledMinsByGoal = buildScheduledMinsByGoal(scheduleEvents);
+  const doneMinsByGoal = buildDoneMinsByGoal(scheduleEvents);
 
   let totalTasks = 0;
   let completedTasks = 0;
-  state.goals.forEach(g => {
+  state.goals.forEach((g) => {
     if (g.sub_projects) {
-      g.sub_projects.forEach(m => {
+      g.sub_projects.forEach((m) => {
         if (m.tasks && m.tasks.length > 0) {
           totalTasks += m.tasks.length;
-          completedTasks += m.tasks.filter(t => t.completed).length;
+          completedTasks += m.tasks.filter((t) => t.completed).length;
         } else {
           totalTasks += 1;
           if (m.completed) completedTasks += 1;
@@ -59,22 +111,17 @@ export default function AnalyticsSummary() {
     }
   });
 
-  // Calculate calendar counts
-  const allowedCount = state.targetCalendars.filter(c => c.selected).length;
-  const totalCount = state.targetCalendars.length;
-
   return (
     <div style={styles.container} className="animate-fade-in">
       <div style={styles.header}>
         <h2 style={styles.pageTitle}>Upskilling Analytics Summary 📊</h2>
-        <p style={styles.pageSubtitle}>Monitor goals completion rates, pacing statistics, and security whitelists.</p>
+        <p style={styles.pageSubtitle}>Monitor goals completion rates and pacing statistics.</p>
       </div>
 
       <div style={styles.grid}>
-        {/* Metric 1: Total Hours Scheduled */}
         <div style={styles.metricCard} className="glass-card">
           <div style={styles.metricHeader}>
-            <span style={styles.metricLabel}>Total Accumulated Time</span>
+            <span style={styles.metricLabel}>Total Scheduled Time</span>
             <span style={styles.metricIcon}>⏱️</span>
           </div>
           <div style={styles.metricValue}>
@@ -85,7 +132,19 @@ export default function AnalyticsSummary() {
           </p>
         </div>
 
-        {/* Metric 2: Completion Projection */}
+        <div style={styles.metricCard} className="glass-card">
+          <div style={styles.metricHeader}>
+            <span style={styles.metricLabel}>Total Time Done</span>
+            <span style={styles.metricIcon}>✅</span>
+          </div>
+          <div style={styles.metricValue}>
+            {totalHoursDone.toFixed(1)} <span style={styles.unit}>hrs</span>
+          </div>
+          <p style={styles.metricDesc}>
+            Approved learning blocks from the schedule whose end time has already passed.
+          </p>
+        </div>
+
         <div style={styles.metricCard} className="glass-card">
           <div style={styles.metricHeader}>
             <span style={styles.metricLabel}>Milestones Finished</span>
@@ -98,58 +157,41 @@ export default function AnalyticsSummary() {
             Number of project tasks and checklist items checked off.
           </p>
         </div>
-
-        {/* Metric 3: Security Status */}
-        <div style={styles.metricCard} className="glass-card">
-          <div style={styles.metricHeader}>
-            <span style={styles.metricLabel}>Calendar Scoping</span>
-            <span style={styles.metricIcon}>🛡️</span>
-          </div>
-          <div style={styles.metricValue}>
-            {allowedCount} / {totalCount}
-          </div>
-          <p style={styles.metricDesc}>
-            Calendars whitelisted for scheduling. Others remain strictly isolated.
-          </p>
-        </div>
       </div>
 
-      {/* Target Progress Bar Section */}
       <div style={styles.progressSection} className="glass-card">
         <div style={styles.progressLabelRow}>
           <span>Weekly Allocation Target Pace (Week Offset: {state.currentWeekOffset})</span>
           <span>{weeklyHoursScheduled.toFixed(1)}h / {weeklyTarget}h ({progressPercent}%)</span>
         </div>
         <div style={styles.progressBarBg}>
-          <div 
-            style={{ 
-              ...styles.progressBarFill, 
+          <div
+            style={{
+              ...styles.progressBarFill,
               width: `${progressPercent}%`,
-              background: progressPercent >= 100 
-                ? 'linear-gradient(to right, var(--color-success), #34d399)' 
-                : 'linear-gradient(to right, var(--color-accent), #38bdf8)'
+              background: progressPercent >= 100
+                ? 'linear-gradient(to right, var(--color-success), #34d399)'
+                : 'linear-gradient(to right, var(--color-accent), #38bdf8)',
             }}
-          ></div>
+          />
         </div>
       </div>
 
-      {/* Goal Pacing Categories List */}
       <div style={styles.goalListingBox} className="glass-card">
         <h3 style={styles.boxTitle}>Goals Distribution & Time Invested</h3>
-        
+
         {state.goals.length === 0 ? (
           <div style={styles.emptyText}>No goals created yet. Complete onboarding or head to Goal Builder.</div>
         ) : (
           <div style={styles.goalsProgressContainer}>
             {state.goals.map((g) => {
-              // Calculate completion of task list
               let tCount = 0;
               let cCount = 0;
               if (g.sub_projects) {
-                g.sub_projects.forEach(m => {
+                g.sub_projects.forEach((m) => {
                   if (m.tasks && m.tasks.length > 0) {
                     tCount += m.tasks.length;
-                    cCount += m.tasks.filter(t => t.completed).length;
+                    cCount += m.tasks.filter((t) => t.completed).length;
                   } else {
                     tCount += 1;
                     if (m.completed) cCount += 1;
@@ -157,6 +199,8 @@ export default function AnalyticsSummary() {
                 });
               }
               const pct = tCount > 0 ? Math.round((cCount / tCount) * 100) : 0;
+              const scheduledMins = scheduledMinsByGoal[g.title] || computeGoalScheduledMins(g) || 0;
+              const doneMins = doneMinsByGoal[g.title] || 0;
 
               return (
                 <div key={g.id} style={styles.goalProgressItem}>
@@ -165,14 +209,17 @@ export default function AnalyticsSummary() {
                       <strong style={styles.goalName}>{g.title}</strong>
                       <span style={styles.goalDescText}> ({g.status})</span>
                     </div>
-                    <span style={styles.goalTimeSpent}>⏱️ {g.time_spent_mins || 0} mins logged</span>
+                    <span style={styles.goalTimeSpent}>
+                      <span>⏱️ {formatDurationMins(scheduledMins)} scheduled</span>
+                      <span style={styles.goalDoneTime}> · ✅ {formatDurationMins(doneMins)} done</span>
+                    </span>
                   </div>
 
                   <div style={styles.progressBarWrapper}>
                     <div style={styles.barBg}>
-                      <div style={{ ...styles.barFill, width: `${pct}%` }}></div>
+                      <div style={{ ...styles.barFill, width: `${pct}%` }} />
                     </div>
-                    <span style={styles.barPct}>{pct}% done</span>
+                    <span style={styles.barPct}>{pct}% tasks done</span>
                   </div>
                 </div>
               );
@@ -298,10 +345,6 @@ const styles = {
     borderBottom: '1px solid var(--border-divider)',
     paddingBottom: '16px',
   },
-  goalProgressItemLast: {
-    borderBottom: 'none',
-    paddingBottom: 0,
-  },
   goalInfoRow: {
     display: 'flex',
     justifyContent: 'space-between',
@@ -318,6 +361,10 @@ const styles = {
   goalTimeSpent: {
     fontSize: '12px',
     color: 'var(--color-accent)',
+    fontWeight: '600',
+  },
+  goalDoneTime: {
+    color: 'var(--color-success, #10b981)',
     fontWeight: '600',
   },
   progressBarWrapper: {
@@ -342,5 +389,5 @@ const styles = {
     color: 'var(--color-text-muted)',
     width: '70px',
     textAlign: 'right',
-  }
+  },
 };

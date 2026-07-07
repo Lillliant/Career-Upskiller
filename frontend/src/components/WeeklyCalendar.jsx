@@ -364,7 +364,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     setIsStaging(true);
     setStageMessage('');
     try {
-      const data = await stageWeeklySchedule(setState);
+      const data = await stageWeeklySchedule(setState, { weekOffset: state.currentWeekOffset });
       const eventCount = (data.proposed_events || []).length;
       if (eventCount === 0) {
         setStageMessage(data.reason || 'No events were staged for this week.');
@@ -459,7 +459,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
       )}
 
       {/* Scarcity / Staging Zero-Trust Banner */}
-      {state.proposedEvents.length > 0 && state.currentWeekOffset === 0 && (
+      {state.proposedEvents.length > 0 && state.stagedWeekOffset === state.currentWeekOffset && (
         <div style={styles.approvalWidget} className="glass-card">
           <div style={styles.approvalHeader}>
             <div style={styles.badge}>🔐 New Events Pending Your Approval</div>

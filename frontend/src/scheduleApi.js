@@ -1,6 +1,10 @@
-/** Stage this week's learning blocks from project task due dates. */
-export async function stageWeeklySchedule(setState) {
-  const res = await fetch('/api/schedule/stage', { method: 'POST' });
+/** Stage learning blocks for the week shown on the schedule page. */
+export async function stageWeeklySchedule(setState, { weekOffset = 0 } = {}) {
+  const res = await fetch('/api/schedule/stage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ week_offset: weekOffset }),
+  });
   if (!res.ok) {
     let message = 'Failed to stage weekly schedule';
     try {
@@ -19,7 +23,7 @@ export async function stageWeeklySchedule(setState) {
     reason: data.reason || '',
     transactionId: data.transaction_id || '',
     token: data.token || '',
-    currentWeekOffset: 0,
+    stagedWeekOffset: data.week_offset ?? weekOffset,
   });
 
   return data;
@@ -79,6 +83,76 @@ export async function clearDayLearningEvents(date) {
 
   if (!res.ok) {
     let message = 'Failed to clear day';
+    try {
+      const err = await res.json();
+      message = err.detail || err.message || message;
+    } catch (_) {
+      // ignore parse errors
+    }
+    throw new Error(message);
+  }
+
+  return res.json();
+}
+
+/** Fetch workload vs planning-horizon summary. */
+export async function fetchScheduleCapacity() {
+  const res = await fetch('/api/schedule/capacity');
+  if (!res.ok) {
+    throw new Error('Failed to fetch schedule capacity');
+  }
+  return res.json();
+}
+
+/** Preview or apply priority-aware due-date rebalancing across all projects. */
+export async function rebalanceSchedule({
+  preview = false,
+  pauseLowerPriority = false,
+  hoursPerWeek = null,
+} = {}) {
+  const body = {
+    preview,
+    pause_lower_priority: pauseLowerPriority,
+  };
+  if (hoursPerWeek != null) {
+    body.hours_per_week = hoursPerWeek;
+  }
+
+  const res = await fetch('/api/schedule/rebalance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    let message = 'Failed to rebalance schedule';
+    try {
+      const err = await res.json();
+      message = err.detail || err.message || message;
+    } catch (_) {
+      // ignore parse errors
+    }
+    throw new Error(message);
+  }
+
+  return res.json();
+}
+
+/** Resume on-hold projects (all, or specific goal IDs). */
+export async function resumeOnHoldGoals({ goalIds = null } = {}) {
+  const body = {};
+  if (goalIds != null) {
+    body.goal_ids = goalIds;
+  }
+
+  const res = await fetch('/api/schedule/resume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    let message = 'Failed to resume projects';
     try {
       const err = await res.json();
       message = err.detail || err.message || message;

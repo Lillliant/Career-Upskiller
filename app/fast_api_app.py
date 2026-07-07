@@ -91,6 +91,20 @@ class ScheduleApprovalEnvelope(BaseModel):
     proposed_events: list[dict[str, Any]] | None = None
     calendar_scopes: list[str] | None = None
 
+
+class ScheduleRebalanceRequest(BaseModel):
+    preview: bool = True
+    pause_lower_priority: bool = False
+    hours_per_week: float | None = None
+
+
+class ScheduleStageRequest(BaseModel):
+    week_offset: int = 0
+
+
+class ResumeGoalsRequest(BaseModel):
+    goal_ids: list[str] | None = None
+
 setup_telemetry()
 
 # Resilient Logger and Credentials Fallback
@@ -236,11 +250,11 @@ def reset_state():
 
 
 @app.post("/api/schedule/stage")
-def stage_weekly_schedule():
-    """Stage this week's learning blocks from task due dates across active projects."""
+def stage_weekly_schedule(request: ScheduleStageRequest = ScheduleStageRequest()):
+    """Stage learning blocks for the selected week from task due dates across active projects."""
     from app.schedule_proposal import build_weekly_schedule_proposal
 
-    proposal = build_weekly_schedule_proposal()
+    proposal = build_weekly_schedule_proposal(week_offset=request.week_offset)
     return {"status": "success", **proposal}
 
 
@@ -253,6 +267,70 @@ def approve_weekly_schedule(envelope: ScheduleApprovalEnvelope):
     if result.get("status") != "success":
         raise HTTPException(status_code=400, detail=result.get("message", "Approval failed."))
     return result
+
+
+@app.get("/api/schedule/capacity")
+def get_schedule_capacity():
+    """Return workload vs planning-horizon summary for the active portfolio."""
+    from app.scheduling_utils import compute_schedule_capacity
+
+    profile = state_store.get_user_profile()
+    return {"status": "success", "capacity": compute_schedule_capacity(profile)}
+
+
+@app.post("/api/schedule/rebalance")
+def rebalance_schedule(request: ScheduleRebalanceRequest):
+    """Preview or apply priority-aware due-date rebalancing across all projects."""
+    from app.state_store import apply_schedule_rebalance, build_schedule_rebalance_preview
+
+    profile = state_store.get_user_profile()
+    if request.preview:
+        result = build_schedule_rebalance_preview(
+            profile,
+            pause_lower_priority=request.pause_lower_priority,
+            hours_per_week=request.hours_per_week,
+        )
+        return {"status": "success", "preview": True, **result}
+
+    updated = apply_schedule_rebalance(
+        profile,
+        pause_lower_priority=request.pause_lower_priority,
+        hours_per_week=request.hours_per_week,
+    )
+    rebalance_meta = updated.pop("schedule_rebalance", {})
+    state_store.update_user_profile(updated)
+    refreshed = state_store.get_user_profile()
+    return {
+        "status": "success",
+        "preview": False,
+        "goals": refreshed.get("goals", []),
+        "capacity": refreshed.get("schedule_capacity"),
+        "schedule_capacity_warning": refreshed.get("schedule_capacity_warning"),
+        "changes": rebalance_meta.get("changes", []),
+        "paused_goals": rebalance_meta.get("paused_goals", []),
+    }
+
+
+@app.post("/api/schedule/resume")
+def resume_on_hold_goals(request: ResumeGoalsRequest):
+    """Resume one or all on-hold projects and rebalance due dates."""
+    from app.state_store import apply_resume_goals_from_hold
+
+    profile = state_store.get_user_profile()
+    updated, resumed = apply_resume_goals_from_hold(profile, goal_ids=request.goal_ids)
+    if resumed:
+        state_store.update_user_profile(
+            {"goals": updated.get("goals", profile.get("goals", []))},
+            skip_goal_pacing=True,
+        )
+    refreshed = state_store.get_user_profile()
+    return {
+        "status": "success",
+        "resumed": resumed,
+        "goals": refreshed.get("goals", []),
+        "schedule_capacity_warning": refreshed.get("schedule_capacity_warning"),
+        "capacity": refreshed.get("schedule_capacity"),
+    }
 
 
 @app.post("/api/schedule/reject")
@@ -269,12 +347,9 @@ def get_sunday_week_start(
     reference_date: datetime.date | None = None, week_offset: int = 0
 ) -> datetime.date:
     """Return the Sunday that starts the week containing reference_date, shifted by week_offset."""
-    if reference_date is None:
-        reference_date = datetime.date.today()
-    days_since_sunday = (reference_date.weekday() + 1) % 7
-    return reference_date - datetime.timedelta(days=days_since_sunday) + datetime.timedelta(
-        weeks=week_offset
-    )
+    from app.scheduling_utils import get_sunday_week_start as _get_sunday_week_start
+
+    return _get_sunday_week_start(reference_date, week_offset=week_offset)
 
 
 @app.get("/api/calendar/events")
