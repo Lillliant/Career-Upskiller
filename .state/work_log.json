@@ -1,15 +1,1 @@
-[
-  {
-    "transaction_id": "tx-03e7c3a1",
-    "action": "scheduled",
-    "events": [
-      {
-        "summary": "Micro-learning: AI Engineering Focus",
-        "start": "2026-07-02T11:30:00-04:00",
-        "end": "2026-07-02T12:00:00-04:00",
-        "description": "Short focused study slot created due to high calendar density."
-      }
-    ],
-    "timestamp": "2026-07-02T01:43:00Z"
-  }
-]
+[]
