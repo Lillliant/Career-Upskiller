@@ -1,4 +1,4 @@
-# Career Skill Concierge 🚀
+# Career Upskiller Concierge 🚀
 
 An intelligent, secure agentic scheduling web application designed to help users balance career development with their busy personal lives. Powered by Google Gemini via the **Agent Development Kit (ADK)** and the **Model Context Protocol (MCP)**.
 
@@ -12,7 +12,7 @@ Modern professionals face a dual challenge when seeking to upskill or pivot care
 ---
 
 ## 💡 The Solution
-The **Career Skill Concierge** resolves these challenges by acting as a proactive and highly secure calendar partner:
+The **Career Upskiller Concierge** resolves these challenges by acting as a proactive and highly secure calendar partner:
 * **Proactive Elicitation (Onboarding):** Walks the user through an onboarding wizard to discover goals, target weekly hours, and preferred study days.
 * **Real-time Market Insights:** Leverages the **Search MCP** server to cross-reference the user's career goals with current hiring trends and automatically recommend focus areas.
 * **Graceful Degradation:** If the calendar is dense with existing events, the scheduler automatically downgrades study blocks from large, intimidating periods to manageable "micro-learning" blocks.
