@@ -261,7 +261,7 @@ def compute_schedule_capacity(
         )
 
     deferred_note = None
-    if low_priority_hours > 0 and warning_type != "horizon_overload":
+    if low_priority_hours > 0 and warning_type not in ("horizon_overload", "portfolio_info"):
         deferred_note = (
             f"{low_priority_hours:.1f} hours of low-priority work will start after "
             f"urgent projects finish."
@@ -290,7 +290,11 @@ def get_sequential_schedulable_tasks(
     week_start: datetime.date,
     week_end: datetime.date,
 ) -> list[dict[str, Any]]:
-    """Return the next schedulable task per goal/milestone chain, due within the week."""
+    """Return the next schedulable task per goal/milestone chain.
+
+    Includes the earliest incomplete task in each chain even when its due date
+    falls outside the selected week so weekly scheduling can work ahead.
+    """
     schedulable: list[dict[str, Any]] = []
     for g in goals:
         if not is_schedulable_goal(g):
@@ -313,51 +317,35 @@ def get_sequential_schedulable_tasks(
                     if remaining_mins <= 0:
                         continue
                     current_task_found = True
-                    due_str = t.get("dueDate")
-                    if not due_str:
-                        break
-                    try:
-                        due_date = datetime.date.fromisoformat(due_str)
-                    except ValueError:
-                        break
-                    if week_start <= due_date <= week_end:
-                        schedulable.append({
-                            "task": t,
-                            "milestone": m,
-                            "goal": g,
-                            "goal_priority": goal_priority,
-                            "milestone_idx": m_idx,
-                            "task_idx": t_idx,
-                            "is_fallback": False,
-                        })
-                    break
-                if current_task_found:
-                    break
-            else:
-                due_str = m.get("dueDate")
-                if not due_str:
-                    break
-                try:
-                    due_date = datetime.date.fromisoformat(due_str)
-                except ValueError:
-                    break
-                if week_start <= due_date <= week_end:
                     schedulable.append({
-                        "task": {
-                            "title": m.get("title"),
-                            "description": m.get("description", f"Milestone: {m.get('title')}"),
-                            "estimated_time": "1 hour",
-                            "dueDate": m.get("dueDate"),
-                            "completed": False,
-                            "allocated_time_mins": 0,
-                        },
+                        "task": t,
                         "milestone": m,
                         "goal": g,
                         "goal_priority": goal_priority,
                         "milestone_idx": m_idx,
-                        "task_idx": 0,
-                        "is_fallback": True,
+                        "task_idx": t_idx,
+                        "is_fallback": False,
                     })
+                    break
+                if current_task_found:
+                    break
+            else:
+                schedulable.append({
+                    "task": {
+                        "title": m.get("title"),
+                        "description": m.get("description", f"Milestone: {m.get('title')}"),
+                        "estimated_time": "1 hour",
+                        "dueDate": m.get("dueDate"),
+                        "completed": False,
+                        "allocated_time_mins": 0,
+                    },
+                    "milestone": m,
+                    "goal": g,
+                    "goal_priority": goal_priority,
+                    "milestone_idx": m_idx,
+                    "task_idx": 0,
+                    "is_fallback": True,
+                })
                 break
     return schedulable
 
@@ -437,28 +425,9 @@ def explain_no_schedulable_tasks(
             "Increase your weekly study hours or wait for next week's tasks to become due."
         )
 
-    next_due: datetime.date | None = None
-    for item in active:
-        task = item["task"]
-        due_str = task.get("dueDate")
-        if not due_str:
-            continue
-        try:
-            due_date = datetime.date.fromisoformat(due_str)
-        except ValueError:
-            continue
-        if due_date > week_end and (next_due is None or due_date < next_due):
-            next_due = due_date
-
-    if next_due:
-        return (
-            f"No tasks are due this week (through {week_end.isoformat()}). "
-            f"Your next task is due {next_due.isoformat()}."
-        )
-
     return (
-        "No tasks are due this week. Check due dates on your milestones and tasks, "
-        "or add new work before scheduling."
+        "No schedulable tasks remain. Check that milestones and tasks have "
+        "estimated time and incomplete work before scheduling."
     )
 
 

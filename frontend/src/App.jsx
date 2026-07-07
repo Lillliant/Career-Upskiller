@@ -47,6 +47,7 @@ export default function App() {
             reason: profile.reason || '',
             transactionId: profile.transaction_id || '',
             token: profile.token || '',
+            stagedWeekOffset: profile.staged_week_offset ?? null,
             onboarded: true,
             scheduledEvents: profile.scheduled_events || []
           };
@@ -127,6 +128,7 @@ export default function App() {
         reason: '',
         transactionId: '',
         token: '',
+        stagedWeekOffset: null,
         scheduledEvents: data.scheduled_events || state.scheduledEvents,
       });
 
@@ -148,6 +150,7 @@ export default function App() {
         reason: '',
         transactionId: '',
         token: '',
+        stagedWeekOffset: null,
       });
     } catch (err) {
       console.error("Failed to reject schedule:", err);

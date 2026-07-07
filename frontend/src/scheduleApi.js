@@ -1,4 +1,21 @@
 /** Stage learning blocks for the week shown on the schedule page. */
+export function inferStagedWeekOffset(proposedEvents, referenceDate = new Date()) {
+  const startIso = proposedEvents?.find((event) => event.start)?.start;
+  if (!startIso) return null;
+
+  const sundayOf = (date) => {
+    const copy = new Date(date);
+    copy.setHours(0, 0, 0, 0);
+    copy.setDate(copy.getDate() - copy.getDay());
+    return copy;
+  };
+
+  const eventSunday = sundayOf(new Date(startIso));
+  const currentSunday = sundayOf(referenceDate);
+  const diffDays = Math.round((eventSunday - currentSunday) / (24 * 60 * 60 * 1000));
+  return Math.round(diffDays / 7);
+}
+
 export async function stageWeeklySchedule(setState, { weekOffset = 0 } = {}) {
   const res = await fetch('/api/schedule/stage', {
     method: 'POST',

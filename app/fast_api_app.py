@@ -298,7 +298,15 @@ def rebalance_schedule(request: ScheduleRebalanceRequest):
         hours_per_week=request.hours_per_week,
     )
     rebalance_meta = updated.pop("schedule_rebalance", {})
-    state_store.update_user_profile(updated)
+    state_store.update_user_profile(
+        {
+            "goals": updated.get("goals", []),
+            "hours_per_week": updated.get("hours_per_week"),
+            "schedule_capacity": updated.get("schedule_capacity"),
+            "schedule_capacity_warning": updated.get("schedule_capacity_warning"),
+        },
+        skip_goal_pacing=True,
+    )
     refreshed = state_store.get_user_profile()
     return {
         "status": "success",

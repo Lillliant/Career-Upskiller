@@ -53,7 +53,18 @@ def _resolve_approved_events(
 
 
 def approve_schedule_proposal(payload: dict[str, Any]) -> dict[str, Any]:
-    """Verify approval envelope and write staged events to calendar."""
+    """Verify approval envelope and write staged events to calendar.
+    
+    ZERO-TRUST HUMAN-IN-THE-LOOP (HITL) IMPLEMENTATION:
+    1. Cryptographic Handshake: Verifies that the client provided the correct 
+       HMAC-SHA256 signature generated for this transaction ID. This prevents
+       malicious or automated modifications to the calendar write path.
+    2. Zero-Trust Abort: If the signature verification fails (using constant-time
+       hmac.compare_digest), it raises a security warning and cancels the write.
+    3. User timing override: Allows the user to edit start/end times via the grid matrix.
+       The client edits are merged and normalized to local offset (-04:00).
+    4. Write Operations: Calls the Calendar API only for authorized events/deletions.
+    """
     tx_id = payload.get("transaction_id")
     token = payload.get("token")
     action = payload.get("action")
@@ -130,6 +141,7 @@ def approve_schedule_proposal(payload: dict[str, Any]) -> dict[str, Any]:
     profile["reason"] = ""
     profile["transaction_id"] = None
     profile["token"] = None
+    profile.pop("staged_week_offset", None)
     state_store.update_user_profile(profile)
 
     return {
@@ -166,6 +178,7 @@ def reject_schedule_proposal(payload: dict[str, Any]) -> dict[str, Any]:
     profile["reason"] = ""
     profile["transaction_id"] = None
     profile["token"] = None
+    profile.pop("staged_week_offset", None)
     state_store.update_user_profile(profile)
 
     return {"status": "success", "message": "Schedule proposal rejected."}

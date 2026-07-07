@@ -53,6 +53,11 @@ class AppStateStore {
     return this.state;
   }
 
+  /**
+   * Updates state store values and notifies all subscribed listeners (reactively updates UI components).
+   * Used to mirror backend response structures (goals list, proposed events, transaction tokens, capacity)
+   * into the unified single-source-of-truth state.
+   */
   setState(newState) {
     this.state = { ...this.state, ...newState };
     this.listeners.forEach(listener => listener(this.state));

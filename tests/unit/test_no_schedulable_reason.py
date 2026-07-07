@@ -2,7 +2,7 @@
 
 import datetime
 
-from app.scheduling_utils import explain_no_schedulable_tasks
+from app.scheduling_utils import explain_no_schedulable_tasks, get_sequential_schedulable_tasks
 
 
 def test_no_active_tasks_message():
@@ -61,7 +61,7 @@ def test_weekly_budget_already_allocated_message():
     assert "already allocated" in reason
 
 
-def test_no_tasks_due_this_week_message():
+def test_upcoming_tasks_are_schedulable_outside_selected_week():
     goals = [
         {
             "title": "Future Project",
@@ -84,11 +84,10 @@ def test_no_tasks_due_this_week_message():
             ],
         }
     ]
-    reason = explain_no_schedulable_tasks(
+    schedulable = get_sequential_schedulable_tasks(
         goals,
         week_start=datetime.date(2026, 7, 6),
         week_end=datetime.date(2026, 7, 12),
-        hours_per_week=5,
     )
-    assert "No tasks are due this week" in reason
-    assert "2026-07-20" in reason
+    assert len(schedulable) == 1
+    assert schedulable[0]["task"]["title"] == "Future task"

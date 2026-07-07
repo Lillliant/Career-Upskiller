@@ -192,7 +192,49 @@ def test_get_sunday_week_start_respects_offset():
     assert future == current + datetime.timedelta(weeks=2)
 
 
-def test_update_goal_reprices_on_sub_projects_change(tmp_path):
+def test_portfolio_warning_shown_on_low_priority_goals():
+    profile = _sample_profile()
+    for goal in profile["goals"]:
+        for task in goal["sub_projects"][0]["tasks"]:
+            task["estimated_time"] = "30 hours"
+    paced = ss.pace_and_schedule_goals(profile)
+    low_goal = next(g for g in paced["goals"] if g["id"] == "goal-low")
+    info = low_goal.get("scheduling_info", "")
+    assert "full portfolio needs about" in info
+    assert "scheduling_warning" not in low_goal
+    assert "low-priority work will start after" not in info
+
+
+def test_rebalance_clears_horizon_overload_warning():
+    due_soon = (datetime.date.today() + datetime.timedelta(days=14)).isoformat()
+    profile = {
+        "hours_per_week": 5,
+        "study_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+        "goals": [{
+            "id": "goal-big",
+            "title": "Big Project",
+            "status": "in-progress",
+            "priority": 2,
+            "sub_projects": [{
+                "title": "M1",
+                "completed": False,
+                "tasks": [{
+                    "title": "Task",
+                    "estimated_time": "50 hours",
+                    "completed": False,
+                    "dueDate": due_soon,
+                }],
+            }],
+        }],
+    }
+    assert su.compute_schedule_capacity(profile)["warning_type"] == "horizon_overload"
+    updated = ss.apply_schedule_rebalance(profile)
+    goal = updated["goals"][0]
+    assert "scheduling_warning" not in goal
+    assert updated["schedule_capacity"]["warning_type"] != "horizon_overload"
+
+
+def test_update_goal_preserves_manual_due_dates(tmp_path):
     store = ss.LocalJsonStateStore(data_dir=str(tmp_path))
     store.create_goal({
         "title": "Test",
@@ -211,9 +253,11 @@ def test_update_goal_reprices_on_sub_projects_change(tmp_path):
     })
     goals = store.get_goals()
     goal_id = goals[0]["id"]
-    assert goals[0]["sub_projects"][0]["tasks"][0]["dueDate"] != "2099-01-01"
 
-    goals[0]["sub_projects"][0]["tasks"][0]["dueDate"] = "2099-06-01"
+    manual_due = "2099-06-01"
+    goals[0]["sub_projects"][0]["tasks"][0]["dueDate"] = manual_due
+    goals[0]["sub_projects"][0]["tasks"][0]["title"] = "Updated Task"
     store.update_goal(goal_id, {"sub_projects": goals[0]["sub_projects"]})
     updated = store.get_goals()[0]
-    assert updated["sub_projects"][0]["tasks"][0]["dueDate"] != "2099-06-01"
+    assert updated["sub_projects"][0]["tasks"][0]["dueDate"] == manual_due
+    assert updated["sub_projects"][0]["tasks"][0]["title"] == "Updated Task"

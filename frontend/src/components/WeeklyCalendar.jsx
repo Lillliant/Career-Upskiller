@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAppState, appState } from '../stateManager';
-import { stageWeeklySchedule, clearDayLearningEvents } from '../scheduleApi';
+import { stageWeeklySchedule, clearDayLearningEvents, inferStagedWeekOffset } from '../scheduleApi';
 
 /** Format a Date as ISO 8601 with the app's fixed -04:00 offset. */
 function toLocalOffsetISO(date) {
@@ -19,6 +19,7 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isStaging, setIsStaging] = useState(false);
   const [stageMessage, setStageMessage] = useState('');
+  const [stagedTaskCount, setStagedTaskCount] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [hoveredEvent, setHoveredEvent] = useState(null);
 
@@ -109,6 +110,14 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
     };
   });
 
+  const effectiveStagedWeekOffset = state.stagedWeekOffset
+    ?? inferStagedWeekOffset(state.proposedEvents);
+  const showProposedForCurrentWeek = state.proposedEvents.length > 0
+    && effectiveStagedWeekOffset != null
+    && effectiveStagedWeekOffset === state.currentWeekOffset;
+  const approvalEventCount = state.proposedEvents.length;
+  const approvalTaskCount = stagedTaskCount ?? approvalEventCount;
+
   // Time labels list (15-minute intervals)
   const timeSlots = [];
   for (let h = startHour; h < endHour; h++) {
@@ -145,8 +154,10 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
       }
     });
 
-    // Add proposed events (only show proposed on the current active week offset = 0)
-    if (state.currentWeekOffset === 0) {
+    // Add proposed events for the week that was staged (pending HITL approval)
+    const showProposedForWeek = effectiveStagedWeekOffset != null
+      && effectiveStagedWeekOffset === state.currentWeekOffset;
+    if (showProposedForWeek) {
       state.proposedEvents.forEach((evt, idx) => {
         if (evt.start && evt.start.startsWith(dateStr)) {
           dayEvents.push({ ...evt, isProposed: true, proposedIdx: idx });
@@ -363,15 +374,14 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
   const handleScheduleWeek = async () => {
     setIsStaging(true);
     setStageMessage('');
+    setStagedTaskCount(null);
     try {
       const data = await stageWeeklySchedule(setState, { weekOffset: state.currentWeekOffset });
       const eventCount = (data.proposed_events || []).length;
       if (eventCount === 0) {
         setStageMessage(data.reason || 'No events were staged for this week.');
       } else {
-        setStageMessage(
-          `Staged ${eventCount} learning block${eventCount === 1 ? '' : 's'} from ${data.task_count || eventCount} task(s). Review and approve below.`
-        );
+        setStagedTaskCount(data.task_count ?? eventCount);
       }
     } catch (err) {
       console.error('Failed to stage weekly schedule:', err);
@@ -459,14 +469,15 @@ export default function WeeklyCalendar({ onApprove, onCancel }) {
       )}
 
       {/* Scarcity / Staging Zero-Trust Banner */}
-      {state.proposedEvents.length > 0 && state.stagedWeekOffset === state.currentWeekOffset && (
+      {showProposedForCurrentWeek && (
         <div style={styles.approvalWidget} className="glass-card">
           <div style={styles.approvalHeader}>
             <div style={styles.badge}>🔐 New Events Pending Your Approval</div>
             <div style={styles.txId}>Transaction: {state.transactionId}</div>
           </div>
           <p style={styles.approvalHint}>
-            Review the proposed schedule below, then approve or reject before these events are added to your calendar.
+            Staged {approvalEventCount} learning block{approvalEventCount === 1 ? '' : 's'} from {approvalTaskCount} task{approvalTaskCount === 1 ? '' : 's'}.
+            {' '}Review the proposed schedule below, then approve or reject before these events are added to your calendar.
           </p>
           
           {state.scarcityFlag && (

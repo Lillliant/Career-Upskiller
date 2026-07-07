@@ -231,7 +231,21 @@ def build_weekly_schedule_proposal(
     *,
     week_offset: int = 0,
 ) -> dict[str, Any]:
-    """Stage proposed learning blocks for the selected week, prioritized by task due dates."""
+    """Stage proposed learning blocks for the selected week, prioritized by task due dates.
+    
+    ALGORITHM & DESIGN BEHAVIOR:
+    1. Budget Allocation: Splits the user's weekly study hour budget across available study days.
+    2. Prioritization & Sorting: Retrieves uncompleted tasks. Priority is given to due dates, 
+       then goal urgency (High -> Medium -> Low), and finally sequential project task order.
+    3. Calendar Intersect (MCP/iCal): Fetches busy slots from Google Calendar (via Calendar MCP client)
+       and public iCal feeds to detect availability conflicts.
+    4. Time Scarcity & Graceful Degradation: If calendar density is high, we degrade task durations
+       (down to 30-minute micro-learning blocks) to fit slots without failing.
+    5. Prioritized Displacement: If slots are still full, the system attempts to displace existing, 
+       less-urgent scheduled learning events with more-urgent tasks.
+    6. Staging & Transaction ID: Generates a stateful transaction ID and an HMAC validation token
+       to enforce Zero-Trust calendar writing.
+    """
     if profile is None:
         profile = state_store.get_user_profile()
     if not profile:
@@ -597,6 +611,7 @@ def build_weekly_schedule_proposal(
         "reason": reason_str,
         "transaction_id": transaction_id,
         "token": token,
+        "staged_week_offset": week_offset,
     })
 
     return proposal_payload

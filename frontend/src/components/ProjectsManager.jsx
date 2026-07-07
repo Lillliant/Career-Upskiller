@@ -214,6 +214,7 @@ export default function ProjectsManager() {
   const totalProjectCount = state.goals.length;
   const filteredProjectCount = sortedGoals.length;
   const capacityWarning = state.goals.find((g) => g.scheduling_warning)?.scheduling_warning;
+  const capacityInfo = state.goals.find((g) => g.scheduling_info)?.scheduling_info;
   const onHoldGoals = state.goals.filter((g) => g.status === 'on-hold');
   const goalHoursStats = activeGoal ? computeGoalHoursStats(activeGoal) : null;
 
@@ -315,6 +316,39 @@ export default function ProjectsManager() {
     }
   };
 
+  const formatScheduleActionFeedback = (data, { pauseLowerPriority = false, hoursPerWeek = null } = {}) => {
+    const pausedCount = data.paused_goals?.length || 0;
+    const changeCount = data.changes?.length || 0;
+    const changeLabel = `${changeCount} due date${changeCount === 1 ? '' : 's'}`;
+
+    if (pauseLowerPriority) {
+      if (pausedCount === 0) {
+        return 'No lower-priority projects to pause — your schedule is already focused on urgent work.';
+      }
+      if (changeCount > 0) {
+        const pausedLabel = `${pausedCount} project${pausedCount === 1 ? '' : 's'}`;
+        return `Paused ${pausedLabel} and rescheduled ${changeLabel} for urgent work.`;
+      }
+      const pausedLabel = `${pausedCount} project${pausedCount === 1 ? '' : 's'}`;
+      return `Paused ${pausedLabel}. Urgent due dates were already up to date.`;
+    }
+
+    if (hoursPerWeek != null) {
+      if (changeCount > 0) {
+        return `Increased weekly study hours to ${hoursPerWeek} and rescheduled ${changeLabel}.`;
+      }
+      return `Increased weekly study hours to ${hoursPerWeek}. Due dates were already up to date.`;
+    }
+
+    if (changeCount > 0) {
+      return `Rebalanced ${changeLabel} across your projects.`;
+    }
+    if (!data.schedule_capacity_warning) {
+      return 'Due dates are up to date — no further rebalancing was needed.';
+    }
+    return null;
+  };
+
   const applyScheduleRebalance = async ({ pauseLowerPriority = false, hoursPerWeek = null } = {}) => {
     setRebalanceLoading(true);
     try {
@@ -325,7 +359,11 @@ export default function ProjectsManager() {
       });
       setState({ goals: data.goals || [] });
       if (hoursPerWeek != null) {
-        setState({ hoursPerWeek });
+        setState({ hoursPerWeek: hoursPerWeek });
+      }
+      const feedback = formatScheduleActionFeedback(data, { pauseLowerPriority, hoursPerWeek });
+      if (feedback) {
+        window.alert(feedback);
       }
       return data;
     } catch (err) {
@@ -345,7 +383,7 @@ export default function ProjectsManager() {
   };
 
   const handleFocusUrgent = async () => {
-    if (!window.confirm('Pause lower-priority projects and rebalance due dates so urgent work is scheduled first?')) {
+    if (!window.confirm('Pause lower-priority projects and reschedule urgent work first?')) {
       return;
     }
     await applyScheduleRebalance({ pauseLowerPriority: true });
@@ -455,6 +493,32 @@ export default function ProjectsManager() {
           disabled={rebalanceLoading}
         >
           Rebalance due dates
+        </button>
+        <button
+          type="button"
+          style={styles.warningActionBtnSecondary}
+          onClick={handleIncreaseWeeklyHours}
+          disabled={rebalanceLoading}
+        >
+          Increase weekly hours
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderCapacityInfo = (infoText) => (
+    <div style={styles.infoBanner} className="glass-card">
+      <div style={{ marginBottom: '10px' }}>
+        <strong>ℹ️ Portfolio schedule note:</strong> {infoText}
+      </div>
+      <div style={styles.warningActions}>
+        <button
+          type="button"
+          style={styles.warningActionBtn}
+          onClick={handleFocusUrgent}
+          disabled={rebalanceLoading}
+        >
+          Focus on urgent projects
         </button>
         <button
           type="button"
@@ -833,6 +897,7 @@ export default function ProjectsManager() {
           </div>
 
           {capacityWarning && renderCapacityWarning(capacityWarning)}
+          {!capacityWarning && capacityInfo && renderCapacityInfo(capacityInfo)}
           {renderOnHoldBanner()}
 
           <div style={styles.createBox} className="glass-card">
@@ -986,6 +1051,7 @@ export default function ProjectsManager() {
         {activeGoal ? (
           <div style={styles.detailCard} className="glass-card">
             {activeGoal.scheduling_warning && renderCapacityWarning(activeGoal.scheduling_warning)}
+            {!activeGoal.scheduling_warning && activeGoal.scheduling_info && renderCapacityInfo(activeGoal.scheduling_info)}
             {activeGoal.status === 'on-hold' && (
               <div style={styles.onHoldBanner}>
                 <div style={{ marginBottom: '10px' }}>
@@ -1656,6 +1722,16 @@ const styles = {
     borderRadius: '8px',
     border: '1px solid rgba(251, 191, 36, 0.35)',
     backgroundColor: 'rgba(251, 191, 36, 0.1)',
+    color: 'var(--color-text-main)',
+    fontSize: '12px',
+    lineHeight: '1.5',
+    marginBottom: '8px',
+  },
+  infoBanner: {
+    padding: '12px 16px',
+    borderRadius: '8px',
+    border: '1px solid rgba(99, 102, 241, 0.35)',
+    backgroundColor: 'rgba(99, 102, 241, 0.08)',
     color: 'var(--color-text-main)',
     fontSize: '12px',
     lineHeight: '1.5',

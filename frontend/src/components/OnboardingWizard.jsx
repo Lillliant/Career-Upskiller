@@ -310,6 +310,8 @@ export default function OnboardingWizard() {
 
     if (isWizard) {
       updatedState.activeTab = 'builder';
+    } else if (state.onboarded) {
+      updatedState.activeTab = 'schedule';
     }
 
     // Live Mode
@@ -332,7 +334,8 @@ export default function OnboardingWizard() {
           scarcityFlag: profile.scarcity_flag || false,
           reason: profile.reason || '',
           transactionId: profile.transaction_id || '',
-          token: profile.token || ''
+          token: profile.token || '',
+          stagedWeekOffset: profile.staged_week_offset ?? null,
         });
       }
 
@@ -606,13 +609,15 @@ export default function OnboardingWizard() {
           </form>
         </div>
 
-        <button
-          onClick={() => handleSavePreferences(false)}
-          style={styles.primaryButton}
-          disabled={isSaving}
-        >
-          {isSaving ? 'Saving...' : 'Save & Re-Schedule'}
-        </button>
+        <div style={styles.buttonGroup}>
+          <button
+            onClick={() => handleSavePreferences(false)}
+            style={styles.primaryButton}
+            disabled={isSaving}
+          >
+            {isSaving ? 'Saving...' : 'Save & Continue to Schedule'}
+          </button>
+        </div>
       </div>
     );
   }
@@ -689,6 +694,12 @@ export default function OnboardingWizard() {
                 );
               })}
             </div>
+          </div>
+
+          <div style={styles.buttonGroup}>
+            <button onClick={() => setStep(2)} style={styles.primaryButton}>
+              Continue to Calendar Setup →
+            </button>
           </div>
         </div>
       )}

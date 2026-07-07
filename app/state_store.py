@@ -57,6 +57,45 @@ class BaseStateStore(ABC):
 
 
 
+def _apply_capacity_warnings_to_profile(profile: dict[str, Any]) -> None:
+    """Attach horizon overload vs portfolio info messages to goals and profile."""
+    from app.scheduling_utils import (
+        NEAR_TERM_PRIORITY_THRESHOLD,
+        compute_schedule_capacity,
+        get_goal_priority,
+        is_schedulable_goal,
+        schedulable_goals,
+    )
+
+    goals = profile.get("goals", [])
+    for g in goals:
+        g.pop("scheduling_warning", None)
+        g.pop("scheduling_info", None)
+        g.pop("scheduling_deferred_note", None)
+
+    capacity = compute_schedule_capacity(profile)
+    warning = capacity.get("warning")
+    warning_type = capacity.get("warning_type")
+    deferred_note = capacity.get("deferred_note")
+
+    profile["schedule_capacity"] = capacity
+    if warning:
+        profile["schedule_capacity_warning"] = warning
+        if warning_type == "horizon_overload":
+            for g in schedulable_goals(goals):
+                g["scheduling_warning"] = warning
+        elif warning_type == "portfolio_info":
+            for g in schedulable_goals(goals):
+                g["scheduling_info"] = warning
+    else:
+        profile.pop("schedule_capacity_warning", None)
+
+    if deferred_note:
+        for g in goals:
+            if is_schedulable_goal(g) and get_goal_priority(g) < NEAR_TERM_PRIORITY_THRESHOLD:
+                g["scheduling_deferred_note"] = deferred_note
+
+
 def adjust_past_due_dates(sub_projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Checks all sub-projects/milestones and ensures their due dates are not in the past."""
     import datetime
@@ -204,11 +243,19 @@ def pace_and_schedule_goals(
     Phase 1 schedules high/medium urgency work from today. Phase 2 schedules
     low-urgency work after phase 1 completes. Capacity warnings focus on
     near-term (high/medium) workload within the planning horizon.
+
+    DESIGN & BEHAVIOR:
+    - Priority-Aware Allocator: Sorts goals by priority (High/Medium first, then Low).
+    - Preserves Dates: If specific goal IDs are flagged to preserve (e.g. goals just resumed from hold),
+      their milestones/tasks due dates are not modified.
+    - Two-Phase Layout: High/Medium priority tasks are scheduled first starting from today, 
+      taking up the daily study budget. Low priority tasks are packed after all high/medium tasks are allocated.
+    - Horizon/Capacity Warnings: Evaluates whether near-term workload exceeds capacity and flags it
+      so the user dashboard can alert the user.
     """
     import datetime
     from app.scheduling_utils import (
         NEAR_TERM_PRIORITY_THRESHOLD,
-        compute_schedule_capacity,
         get_goal_priority,
         is_schedulable_goal,
         normalize_priority,
@@ -229,6 +276,7 @@ def pace_and_schedule_goals(
     for g in goals:
         g["priority"] = normalize_priority(g.get("priority", 1))
         g.pop("scheduling_warning", None)
+        g.pop("scheduling_info", None)
 
     active_goals = sorted(
         schedulable_goals(goals),
@@ -274,32 +322,7 @@ def pace_and_schedule_goals(
             continue
         _pace_goal_subprojects(g, allocate_hours)
 
-    capacity = compute_schedule_capacity(profile)
-    warning = capacity.get("warning")
-    warning_type = capacity.get("warning_type")
-    deferred_note = capacity.get("deferred_note")
-
-    if warning:
-        profile["schedule_capacity_warning"] = warning
-        profile["schedule_capacity"] = capacity
-        for g in active_goals:
-            if not is_schedulable_goal(g):
-                continue
-            if warning_type == "horizon_overload":
-                g["scheduling_warning"] = warning
-            elif get_goal_priority(g) >= NEAR_TERM_PRIORITY_THRESHOLD:
-                g["scheduling_warning"] = warning
-            elif deferred_note:
-                g["scheduling_warning"] = deferred_note
-    else:
-        profile.pop("schedule_capacity_warning", None)
-        profile["schedule_capacity"] = capacity
-        if deferred_note:
-            for g in deferred_goals:
-                g["scheduling_deferred_note"] = deferred_note
-        else:
-            for g in goals:
-                g.pop("scheduling_deferred_note", None)
+    _apply_capacity_warnings_to_profile(profile)
 
     return profile
 
@@ -383,43 +406,7 @@ def refresh_goals_if_past_due(profile: dict[str, Any]) -> tuple[dict[str, Any], 
 
 def attach_capacity_warnings(profile: dict[str, Any]) -> dict[str, Any]:
     """Refresh schedule-capacity warnings on goals without re-pacing due dates."""
-    from app.scheduling_utils import (
-        NEAR_TERM_PRIORITY_THRESHOLD,
-        compute_schedule_capacity,
-        get_goal_priority,
-        is_schedulable_goal,
-    )
-
-    goals = profile.get("goals", [])
-    for g in goals:
-        g.pop("scheduling_warning", None)
-        g.pop("scheduling_deferred_note", None)
-
-    capacity = compute_schedule_capacity(profile)
-    warning = capacity.get("warning")
-    warning_type = capacity.get("warning_type")
-    deferred_note = capacity.get("deferred_note")
-
-    if warning:
-        profile["schedule_capacity_warning"] = warning
-        profile["schedule_capacity"] = capacity
-        for g in goals:
-            if not is_schedulable_goal(g):
-                continue
-            if warning_type == "horizon_overload":
-                g["scheduling_warning"] = warning
-            elif get_goal_priority(g) >= NEAR_TERM_PRIORITY_THRESHOLD:
-                g["scheduling_warning"] = warning
-            elif deferred_note:
-                g["scheduling_warning"] = deferred_note
-    else:
-        profile.pop("schedule_capacity_warning", None)
-        profile["schedule_capacity"] = capacity
-        if deferred_note:
-            for g in goals:
-                if is_schedulable_goal(g) and get_goal_priority(g) < NEAR_TERM_PRIORITY_THRESHOLD:
-                    g["scheduling_deferred_note"] = deferred_note
-
+    _apply_capacity_warnings_to_profile(profile)
     return profile
 
 
@@ -630,7 +617,12 @@ class LocalJsonStateStore(BaseStateStore):
         profile["goals"] = updated_goals
         update_tasks_allocated_time(profile)
         if any(k in goal_data for k in ("sub_projects", "status", "priority")):
-            profile = pace_and_schedule_goals(profile)
+            preserve_ids = {goal_id} if "sub_projects" in goal_data else None
+            profile = pace_and_schedule_goals(
+                profile, preserve_goal_ids=preserve_ids
+            )
+        else:
+            profile = attach_capacity_warnings(profile)
         self._write_json(self.profile_path, profile)
 
     def create_goal(self, goal_data: dict[str, Any]) -> None:
